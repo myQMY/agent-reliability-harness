@@ -1,0 +1,44 @@
+# --- 密钥与本地配置：绝不入库 ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+.coverage
+htmlcov/
+
+# --- 运行产物：可由复现命令重建，体量大 ---
+/traces/
+/results/
+/runs/
+/experiments/outputs/
+*.db
+*.sqlite3
+*.parquet
+*.log
+checkpoints/
+
+# --- 编辑器与系统 ---
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# --- 本地工作数据：不进入作品仓库 ---
+.workbuddy/
+/Agent实习项目候选清单.html
