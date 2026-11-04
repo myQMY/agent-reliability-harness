@@ -1,13 +1,13 @@
 # 技术实现方案：Agent 可靠性评测与运行时平台
 
-> 状态：选型已确认，待实现。本文只定技术实现口径，不修改 [MVP 产品设计](mvp-design.md) 已确认的功能范围与验收标准；不写任何未经验证的结果数字。
+> 状态：选型已确认，MVP 已实现（W1 全部 + W2 判分 / trace）。本文只定技术实现口径，不修改 [MVP 产品设计](mvp-design.md) 已确认的功能范围与验收标准；不写任何未经验证的结果数字。
 > 适用阶段：W1–W2（MVP），并给出 W3–W5 的依赖升级点。整体定位见 [README.md](../README.md)，协作规则见 [AGENTS.md](../AGENTS.md)。
 
 ## 1. 总体结论
 
 **按「测量仪器」选栈，而不是按「Agent 应用」选栈。**
 
-Python 3.11+ 标准库为主，`sqlite3` 作领域库，JSONL 作任务 / trace / 结果行的载体，`unittest` + `argparse` 作测试与 CLI，MVP 全程**零第三方依赖**。唯一预留的可选第三方是 OpenAI 兼容 SDK，仅在切换真实模型时启用，不进入默认执行路径。
+Python 3.11+ 标准库为主，`sqlite3` 作领域库，JSONL 作任务 / trace / 结果行的载体，`unittest` + `argparse` 作测试与 CLI，MVP 全程**零第三方依赖**。实现时 `OpenAIBackend` 用标准库 `urllib` 直接调用 OpenAI 兼容的 HTTP 接口，连可选后端都不需要 SDK，因此依赖清单实际为零；该开关仅在 `--backend openai` 时启用。
 
 明确不引入 Agent 框架。运行时（循环、护栏、上下文、预算）正是本项目要测量和改进的对象；套用 LangChain / LangGraph / LlamaIndex 等于把被测对象换成别人的代码，「证明提升来自 harness 而非换模型」这一核心结论将不再成立。
 
@@ -30,7 +30,7 @@ Python 3.11+ 标准库为主，`sqlite3` 作领域库，JSONL 作任务 / trace 
 
 - **Python 3.11+**（本机 3.13.12）。选 3.11+ 是为了标准库自带 `tomllib`，实验配置可以零依赖读取。
 - 按用途使用：`sqlite3`（领域库）、`json`（数据契约与 trace）、`dataclasses` / `typing`（记录类型与 `Protocol`）、`argparse`（CLI）、`unittest`（测试）、`tomllib`（实验配置）、`pathlib`（路径）。
-- 依赖声明：MVP 无 `requirements.txt`。切换真实模型时以**独立的可选文件**（如 `requirements-llm.txt`）声明 SDK，保证默认路径 `python -m eval.run` 在裸环境下可直接运行。
+- 依赖声明：仓库无 `requirements.txt`，也不需要。真实模型路径只用标准库 `urllib.request`，默认路径 `python -m eval.run` 在裸环境下可直接运行。
 - `.env` 只承载密钥与后端地址，不承载实验参数；实验参数必须版本化入库（见 §5）。
 
 ## 4. 分层实现约定
@@ -40,13 +40,13 @@ Python 3.11+ 标准库为主，`sqlite3` 作领域库，JSONL 作任务 / trace 
 - `sqlite3` 直连 + 手写 `schema.sql`，**不用 ORM**。判分需要一次性把全库 dump 成可比对结构（`table → rows → 字段`），直接 SQL 比 ORM 更短、更可控，也不会把对象生命周期带进评测链路。
 - 每个 trial 从**同一份不可变模板快照**重置：内存库配合 `Connection.backup()`，或复制模板库文件，实现时二选一，要求是 trial 之间零残留、模板本身不被写入。
 - 工具 API 是普通 Python 函数 + 一张注册表（工具名 → 参数 schema → 函数）。schema 手写，不用反射生成框架，也不用第三方 schema 库。
-- 策略规则以 `policy.md` + 可执行的 `policy_checks` 数据表达，判分阶段只做规则比对，不调模型。
+- 策略规则以 `policy.md` + 可执行的 `policy_checks` 数据表达，判分阶段只做规则比对，不调模型。工具层故意不拦截策略，否则「策略违规」这类失败根本不会出现。
 
 ### 4.2 Agent 运行时 `runtime/`
 
 - `Backend` 用 `typing.Protocol` 定义，`ScriptedBackend`（默认，按任务预置脚本返回、无网络无随机）与 `OpenAIBackend`（可选）各自实现，切换只改配置不改 `loop.py`。
 - `loop.py` 手写 `while` 循环 + 结构化工具调用；护栏严格按 F4 只保留 `MAX_STEPS` 与 JSON 解析失败重试 2 次，**不提前补齐护栏**（留出难看的基线是 W3 的自变量）。
-- **IO 收敛原则**：网络与磁盘 IO 只出现在 `Backend` 与 `env` 两层；`loop.py`、`grader.py` 保持同步纯逻辑。这样 W5 做并发时只需改 `runner.py` 与后端实现，循环与判分逻辑不动。
+- **IO 收敛原则**：模型调用与领域库写入只出现在 `Backend` 与 `env` 两层；`loop.py`、`grader.py` 保持同步纯逻辑，trace span 以内存对象返回、由 `eval/trace.py` 统一落盘。这样 W5 做并发时只需改 `runner.py` 与后端实现，循环与判分逻辑不动。
 - MVP 不上 `asyncio`，不上任何 Agent 框架。
 
 ### 4.3 评测 Harness `eval/`
@@ -81,7 +81,7 @@ Python 3.11+ 标准库为主，`sqlite3` 作领域库，JSONL 作任务 / trace 
 | 档位 | 组件 | 引入时机 | 理由 |
 | --- | --- | --- | --- |
 | 现在用 | 标准库（§3） | W1 | 守门测试要求零依赖，默认路径可在裸环境跑通 |
-| 可选开关 | OpenAI 兼容 SDK | W2 切真实模型 | 唯一第三方；走 `LLM_BASE_URL` 等配置，不开启时零成本 |
+| 可选开关 | OpenAI 兼容 HTTP 接口（标准库 `urllib`，无需 SDK） | W2 切真实模型 | 走 `LLM_BASE_URL` 等配置；不开启时零成本、零依赖 |
 | 按阶段引入 | pydantic 或等价 schema 校验 | W3「参数校验护栏」对照组 | 它**本身就是实验自变量**，MVP 就用掉等于提前消耗掉这次消融 |
 | 按阶段引入 | 静态图生成（优先脚本直出 SVG） | W4 出成功率 / 成本帕累托图 | 只影响报告层；优先不引绘图栈，结果表仍是 Markdown |
 | 按阶段引入 | FastAPI / asyncio / Docker / 静态回放页 | W5 服务化 | 单使用者本地跑批不需要 |
@@ -96,19 +96,20 @@ W4 若做框架对照，应作为**独立 backend / loop 实现**并列接入，
 - 任务 / trace span / 结果行三类记录沿用设计文档 §6 的最小字段，**必须能用 `trial_id` 串起来**，否则失败归因不成立。
 - 三类记录共用 §5 的统一序列化函数与固定字段顺序；字段名实现时可微调，但「`trial_id` 串联」与「确定性序列化」不可让步。
 - DB 终态快照规范化为 `{table: [row, ...]}`，行内字段有序；`grader.py` 在规范化之后逐字段 diff，避免把 SQLite 返回顺序当作语义。
+- 任务的 `target_db` 只需写发生变化的行 / 字段，其余从 `initial_db` 继承；`audit_log` 出现时整体覆盖。
 
 ## 8. 测试与验证
 
 - 统一 `unittest`（仅标准库），命令：`python -m unittest discover -s tests -v`。
 - 已有守门测试继续守住协作约定、仓库骨架、`.gitignore`、设计文档锚点；本次新增技术方案锚点守门，防止关键选型被悄悄改掉。
-- 实现阶段需补的用例：环境重置隔离、grader 正例 / 反例、`MAX_STEPS` 触发、trace 完整性、runner 重复次数、**逐字节一致性**、序列化排序稳定、Backend 可切换。
+- 实现阶段需补的用例：环境重置隔离、grader 正例 / 反例、`MAX_STEPS` 触发、trace 完整性、runner 重复次数、**逐字节一致性**、序列化排序稳定、Backend 可切换。以上用例均已落地于 `tests/test_env.py`、`test_grader.py`、`test_loop.py`、`test_runner.py`、`test_reproducibility.py`。
 - 每次改动按 `AGENTS.md`：改动 → 补 / 更新测试 → 全部验证通过 → 一个对应 commit → 交付。
 
 ## 9. 演进路线（核心层不动）
 
 | 阶段 | 技术变化 | 不变的部分 |
 | --- | --- | --- |
-| W2 | 落地 `OpenAIBackend`，接真实模型 | `Backend` 接口、grader、trace 格式 |
+| W2 | `OpenAIBackend` 已落地（离线单测覆盖），待接真实模型验证 | `Backend` 接口、grader、trace 格式 |
 | W3 | 逐项加护栏：参数校验、幂等键、上下文压缩、预算；一次只改一个变量 | 判分与执行主链路 |
 | W4 | 多组单变量对照实验、结果表与帕累托图 | 任务集与判分口径 |
 | W5 | runner 并发化（IO 已收敛）、FastAPI + 读 JSONL 的静态回放页、容器化 | 循环与判分逻辑 |
@@ -118,7 +119,7 @@ Web 层选型到 W5 再定；届时的回放页是只读 JSONL 的展示层，�
 
 ## 10. 落地前置动作与开放项
 
-- **范围泄漏待清理**：`.env.example` 中的 `EVAL_CONCURRENCY` 与 `MAX_TOKENS_PER_TASK` 与「MVP 串行」「预算护栏属 W3 自变量」冲突，容易诱导提前上 `asyncio` 或提前加护栏。W1 落地前应注释掉或标注生效阶段。本文只记录此项，未在本次改动中执行。
-- **模型服务未定**：若目标服务不是 OpenAI 兼容协议，`Backend` 接口需为工具调用格式 / 流式返回差异留一层适配。
+- **范围泄漏已清理**：`.env.example` 中 `EVAL_CONCURRENCY` / `MAX_TOKENS_PER_TASK` / `EVAL_DB_TEMPLATE` 已改为注释并标注 W3 / W5 生效；守门测试增加用例，防止这三个参数以生效配置形式回到 MVP。
+- **模型服务未定**：`OpenAIBackend` 目前按 OpenAI 兼容 `chat/completions` 实现，已用可注入 opener 做离线单测；若目标服务协议不同，需在 `runtime/model.py` 内加一层适配，`loop.py` 与 grader 不受影响。
 - **零第三方依赖**本次按硬约束执行；若后续决定放宽，需同步修改守门测试与设计原则，而不是静默引入。
 - 本文不调整产品范围；范围变更走 `docs/mvp-design.md` 并同步守门测试。

@@ -82,6 +82,21 @@ class TestGitHygiene(unittest.TestCase):
                 return
         self.fail(".env.example 缺少 LLM_API_KEY 空占位")
 
+    def test_out_of_scope_config_not_active(self) -> None:
+        """并发与预算护栏属于 W3/W5 自变量，不能以生效配置形式出现在 MVP。"""
+        for line in read(".env.example").splitlines():
+            stripped = line.strip()
+            for key in (
+                "EVAL_CONCURRENCY=",
+                "MAX_TOKENS_PER_TASK=",
+                "EVAL_DB_TEMPLATE=",
+            ):
+                with self.subTest(key=key):
+                    self.assertFalse(
+                        stripped.startswith(key),
+                        f"{key} 属于 W3/W5 范围，MVP 阶段不得生效",
+                    )
+
 
 class TestDesignDoc(unittest.TestCase):
     """设计文档是范围共识的载体：防止有人删掉「非目标」悄悄扩范围，
