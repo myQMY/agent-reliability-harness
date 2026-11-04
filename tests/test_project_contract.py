@@ -118,5 +118,58 @@ class TestDesignDoc(unittest.TestCase):
                 self.assertIn(compact(anchor), text, f"设计文档缺少关键锚点：{anchor}")
 
 
+class TestTechStackDoc(unittest.TestCase):
+    """技术方案是选型共识的载体：防止有人悄悄引入框架 / ORM / 第三方依赖，
+    或删掉「逐字节一致」这类硬约束，把可复现实验装置退化成普通 Agent demo。
+    """
+
+    DOC = "docs/tech-stack.md"
+
+    def test_tech_stack_doc_exists(self) -> None:
+        self.assertTrue((ROOT / self.DOC).is_file(), f"缺少 {self.DOC}")
+
+    def test_readme_links_tech_stack_doc(self) -> None:
+        self.assertIn(
+            "docs/tech-stack.md",
+            read("README.md"),
+            "README 应指向技术方案，保证实现口径可被找到",
+        )
+
+    def test_core_choices_present(self) -> None:
+        text = compact(read(self.DOC))
+        anchors = (
+            "零第三方依赖",
+            "Python3.11+",
+            "typing.Protocol",
+            "ScriptedBackend",
+            "OpenAIBackend",
+            "逐字节一致",
+            "trial_id",
+            "tomllib",
+            "argparse",
+            "unittest",
+            "按阶段引入",
+            "pydantic",
+            "IO收敛原则",
+        )
+        for anchor in anchors:
+            with self.subTest(anchor=anchor):
+                self.assertIn(compact(anchor), text, f"技术方案缺少关键锚点：{anchor}")
+
+    def test_exclusions_present(self) -> None:
+        """「不引入」的措辞必须保留，防止把被测对象换成第三方框架。"""
+        text = compact(read(self.DOC))
+        exclusions = (
+            "明确不引入Agent框架",
+            "全程不引入",
+            "不用ORM",
+            "LLM-as-Judge",
+            "LangGraph",
+        )
+        for phrase in exclusions:
+            with self.subTest(phrase=phrase):
+                self.assertIn(compact(phrase), text, f"技术方案缺少排除项：{phrase}")
+
+
 if __name__ == "__main__":
     unittest.main()

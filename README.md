@@ -30,7 +30,7 @@ Agent demo 和能稳定运行的 Agent 之间，差的通常不是模型能力�
 | `tests/` | 单元测试与回归用例 |
 | `traces/`, `results/` | 运行产物，自动创建、不入库 |
 
-MVP 的功能范围、设计原则与非目标见 [docs/mvp-design.md](docs/mvp-design.md)。
+MVP 的功能范围、设计原则与非目标见 [docs/mvp-design.md](docs/mvp-design.md)；技术实现口径、依赖策略与确定性约束见 [docs/tech-stack.md](docs/tech-stack.md)。
 
 ## 评测口径
 
