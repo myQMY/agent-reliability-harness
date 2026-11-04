@@ -83,5 +83,40 @@ class TestGitHygiene(unittest.TestCase):
         self.fail(".env.example 缺少 LLM_API_KEY 空占位")
 
 
+class TestDesignDoc(unittest.TestCase):
+    """设计文档是范围共识的载体：防止有人删掉「非目标」悄悄扩范围，
+    或改掉确定性判分 / ScriptedBackend 这类关键选型。"""
+
+    DOC = "docs/mvp-design.md"
+
+    def test_design_doc_exists(self) -> None:
+        self.assertTrue((ROOT / self.DOC).is_file(), f"缺少 {self.DOC}")
+
+    def test_readme_links_design_doc(self) -> None:
+        self.assertIn(
+            "docs/mvp-design.md",
+            read("README.md"),
+            "README 应指向设计文档，保证范围文档可被找到",
+        )
+
+    def test_scope_contract_present(self) -> None:
+        text = compact(read(self.DOC))
+        anchors = (
+            "定位与目标",
+            "设计原则",
+            "MVP 主要功能",
+            "ScriptedBackend",
+            "终态判分",
+            "确定性判分",
+            "明确不做",
+            "LLM-as-Judge",
+            "验收标准",
+            "pass¹",
+        )
+        for anchor in anchors:
+            with self.subTest(anchor=anchor):
+                self.assertIn(compact(anchor), text, f"设计文档缺少关键锚点：{anchor}")
+
+
 if __name__ == "__main__":
     unittest.main()
