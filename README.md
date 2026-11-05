@@ -2,7 +2,7 @@
 
 面向多轮工具调用 Agent 的可靠性评测与运行时平台。
 
-> 状态：W1 全部、W2 全量（判分 / trace / 真实模型观测 / 条件话术 / trace 归因）、P0 实验记录体系、W2.5 测量链路校准，以及 W3 第一条护栏的单变量 A/B 已落地。本文件不写任何未经验证的结论；所有指标以 `experiments/` 下可复现的结果为准。
+> 状态：W1 全部、W2 全量（判分 / trace / 真实模型观测 / 条件话术 / trace 归因）、P0 实验记录体系、W2.5 测量链路校准，以及 W3 两条护栏（`schema_validation` / `idempotency`）构成的 2×2 全因子实验已落地。本文件不写任何未经验证的结论；所有指标以 `experiments/` 下可复现的结果为准。
 
 ## 为什么做这个
 
@@ -27,7 +27,7 @@ Agent demo 和能稳定运行的 Agent 之间，差的通常不是模型能力�
 | `eval/` | 用户模拟器、批量执行器、终态判分、归因分析、CLI |
 | `web/` | trace 回放与实验对照面板（W5） |
 | `docs/` | 产品设计与技术实现方案 |
-| `experiments/` | 版本化实验配置（`config.toml` / `calibration.toml` / `guard_ab_*.toml`）、冻结基线、按 `run_id` 留档的报告、配置快照与结果行 |
+| `experiments/` | 版本化实验配置（`config.toml` / `calibration.toml` / `guard_ab_*.toml`）、冻结基线、按 `run_id` 留档的报告与结果行、`w3_guard_matrix.md` 因子汇总 |
 | `tests/` | 单元测试与回归用例 |
 | `traces/`, `results/` | 运行产物，自动创建、不入库 |
 
@@ -84,27 +84,41 @@ python -m eval.run --config experiments/calibration.toml
 
 **必须说清楚的边界**：`SeededBackend` 没有语言理解能力，故障是人为注入的噪声。校准报告里的数字**只证明尺子能分辨偶发失败，不构成任何模型能力、成本或延迟结论**；它与冻结基线是不同后端，报告的「与冻结基线对照」表只是数值罗列，不能当作 harness 或护栏有效性的因果证据。W3 的单变量对照必须在同一后端下、一次只改一个变量进行。
 
-## W3：第一条护栏与单变量 A/B
+## W3：两条护栏与 2×2 全因子实验
 
-W3 的纪律是**一次只改一个变量、一组结果表、一个 commit**。第一条护栏是 `schema_validation`：
+W3 的纪律是**一次只改一个变量、一组结果表、一个 commit**。两条护栏都默认关闭、由 `[guards].enabled` 驱动，共用同一个拦截预算与 `[GUARD-REJECT]` 拒绝协议；判定顺序固定为 `schema_validation` → `idempotency`。
 
-- 规则与工具层共用 `env/tools.validate_args`（必需字段、类型），用标准库手写，**不引入 pydantic**。pydantic 原本是技术方案里这条护栏的对照锚点，但「零第三方依赖」是更硬的约束，手写 schema 也让「被测对象是自己的代码」这点更清楚。
-- 护栏的价值不在多查了什么，而在**位置**：工具层报错会让这次动作直接丢失；运行时护栏在工具执行前拦下，产生 `role=guard` 的 span 并把 `[GUARD-REJECT]` 拒绝消息写进 messages，让后端有机会重发正确调用——这才是「拦下 → 改对」的可测量链路。
-- 它**只管参数**。工具名合法性、业务策略、坏 JSON、重复写都不归它管，避免一个实验里混入多个自变量。护栏最多拦截 3 次后放行，脚本后端不响应拒绝消息时也能靠 `MAX_STEPS` 收敛。
+| 护栏 | 管什么 | 不管什么 |
+| --- | --- | --- |
+| `schema_validation` | 参数必需字段与类型，规则与工具层共用 `env/tools.validate_args`（标准库手写，**不引入 pydantic**） | 工具名合法性、业务策略、坏 JSON、重复写 |
+| `idempotency` | 从 `(tool, args)` 经 SHA256 确定性派生幂等键，拦下本 trial 内**已成功执行**的重复写 | 读工具（重复查询合法）、失败调用、未知工具、参数 schema、跨进程幂等 |
+
+两条护栏的价值都不在「多查了什么」，而在**位置**：工具层报错会让这次动作直接丢失；运行时护栏在工具执行前拦下，产生 `role=guard` 的 span 并把拒绝消息写进 messages，让后端有机会重发正确调用。`idempotency` 的状态由 `GuardState` 在整个 trial（可能跨多个 turn）共享，键只在内存里、不持久化；写工具清单以 `env/tools.WRITE_TOOLS` 为唯一事实来源。
+
+四份配置构成 **2×2 全因子**，同后端、同 seed、同任务集，唯一自变量是 `[guards].enabled`：
+
+|  | `idempotency` OFF | `idempotency` ON |
+| --- | --- | --- |
+| `schema_validation` OFF | `guard_ab_off.toml` | `guard_ab_idem.toml` |
+| `schema_validation` ON | `guard_ab_on.toml` | `guard_ab_both.toml` |
 
 ```bash
-# 先跑对照组（护栏全关），再跑实验组（只开 schema_validation）
-python -m eval.run --config experiments/guard_ab_off.toml
-python -m eval.run --config experiments/guard_ab_on.toml
+python -m eval.run --config experiments/guard_ab_off.toml    # 对照组
+python -m eval.run --config experiments/guard_ab_on.toml     # 只开 schema_validation
+python -m eval.run --config experiments/guard_ab_idem.toml   # 只开 idempotency
+python -m eval.run --config experiments/guard_ab_both.toml   # 两条都开
+python -m eval.guard_matrix                                  # 汇总 2×2 主效应 / 交互
 ```
 
-两份配置的测量输入（`tasks` / `k` / `backend` / `seed` / `fault_per_mille` / 两条护栏参数）逐字段相同，由 `tests/test_schema_guard.py` 断言；唯一自变量是 `[guards].enabled`。实验组把 `compare` 指向对照组留档的 `result_rows.jsonl`，报告因此切换成「与对照组对照（A/B）」表——**这才是可以作因果解读的对照**；`name` 与 `compare` 只决定落盘位置和对照来源，不进入测量链路。关闭护栏时 `guards` 不进配置摘要，所以 W1 / W2.5 的两个 `run_id` 与快照逐字节不变。
+四格的测量输入由 `tests/test_idempotency_guard.py` 逐字段断言相同；`name` / `compare` 只决定落盘位置与对照来源，不进入测量链路。三个实验组把 `compare` 指向对照组留档的 `result_rows.jsonl`，报告因此切换成「与对照组对照（A/B）」表——**这才是可以作因果解读的对照**；指向 W1 冻结基线则只是跨后端的数值罗列。关闭护栏时 `guards` 不进配置摘要，W1 / W2.5 的 `run_id` 与快照、以及既有 A/B 报告全部逐字节不变。`eval/guard_matrix.py` 只读取四组留档、不重跑评测，产出 [experiments/w3_guard_matrix.md](experiments/w3_guard_matrix.md)：2×2 表、主效应（开 / 关两组均值之差）与交互（双重差分）。
 
-**读表时最容易犯的错**：`invalid_calls` 下降不等于成功率提升。任务脚本里固有的缺陷被拦下后依然失败，只是归因可能从 `bad_args` 变成 `unknown`；论效果只能看 `pass^k`。同理，模拟器没有语言理解能力，这组数字只说明 harness 机制可测量，**不构成真实模型能力、成本或延迟结论**。
+**本 seed 下的实测结果**：四格 pass³ 依次为 0.10 / 0.20 / 0.20 / 0.30，两条护栏主效应各 +0.10，交互为 0——只说明在**这个 seed、这个任务集、这个故障注入率**下效果可加，不推广为一般结论；每格只有 30 个 trial，也不是显著性检验。`both` 格一次改了两项，只用于算交互，**不能**拿它相对对照组的 A/B 表当单变量因果证据；单变量结论看 `off → schema` 与 `off → idem` 两条边。
+
+**读表时最容易犯的错**：`invalid_calls` 不是成功率的代理指标。参数护栏拦下坏参数会让它下降，但任务仍可能失败（归因从 `bad_args` 变成 `unknown`）；幂等护栏拦下的是工具层**不报错**、只是把终态写坏的重复写，实测 `invalid_calls` 从 7 到 7 一点没动，pass³ 却翻倍。两个方向都成立，所以论效果只能看 `pass^k`。模拟器没有语言理解能力，这组数字只说明 harness 机制可测量，**不构成真实模型能力、成本或延迟结论**；幂等键也只在单 trial 内存去重，不承诺跨进程幂等。
 
 ## 开发路线
 
-> W1 全部、W2 全量、P0 实验记录体系、W2.5 校准与 W3 第一条护栏 A/B 已落地；冻结基线见 [experiments/mvp_baseline.md](experiments/mvp_baseline.md)。
+> W1 全部、W2 全量、P0 实验记录体系、W2.5 校准，以及 W3 两条护栏的 2×2 全因子实验已落地；冻结基线见 [experiments/mvp_baseline.md](experiments/mvp_baseline.md)。
 
 | 阶段 | 交付 |
 | --- | --- |
@@ -113,7 +127,7 @@ python -m eval.run --config experiments/guard_ab_on.toml
 | P0 | 实验配置版本化、`run_id` 留档、冻结基线与报告 diff（已交付） |
 | W2 余项 | `ModelReply` 真实观测、条件话术、trace 首个偏离点归因与证据入库（已交付） |
 | W2.5 | `SeededBackend` 校准 `pass^k` 区分度，零成本、不接真实模型（已交付） |
-| W3 | 逐项修运行时，每组只改一个变量：参数 `schema_validation`（已交付）、预算、压缩、幂等、退避 |
+| W3 | 逐项修运行时，每组只改一个变量：参数 `schema_validation`、幂等键 `idempotency` 及其 2×2 主效应 / 交互（已交付）；预算、压缩、退避待续 |
 | W4 | 4–6 组单变量对照实验，出成功率 / 成本帕累托图 |
 | W5 | 服务化、并发、容器化、trace 回放、测试 |
 | W6 | 中文扩展任务集、结果表、复现文档 |

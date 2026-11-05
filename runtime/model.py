@@ -27,6 +27,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Protocol, Sequence
 
+from env import tools
 from runtime import guard
 
 SYSTEM_PROMPT = (
@@ -41,9 +42,8 @@ SYSTEM_PROMPT = (
 GUARD_REJECT_PREFIX = guard.GUARD_REJECT_PREFIX
 
 # 会写坏领域库状态的动作，duplicate_call 故障只重放这些。
-_SEEDED_WRITE_TOOLS = frozenset(
-    {"refund_order", "cancel_order", "notify_customer"}
-)
+# 与护栏 / 判分器共用 env/tools.WRITE_TOOLS，避免三处清单漂移。
+_SEEDED_WRITE_TOOLS = tools.WRITE_TOOLS
 
 FAULT_BAD_JSON = "bad_json"
 FAULT_BAD_ARGS = "bad_args"

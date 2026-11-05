@@ -12,6 +12,7 @@ from typing import Any
 from eval.config import ExperimentConfig
 from eval.grader import FAILURE_TYPES, NO_FAILURE
 from eval.runner import Row, Task
+from runtime.guard import GUARD_IDEMPOTENCY
 
 
 def summarize(rows: list[Row], k: int) -> dict[str, Any]:
@@ -94,12 +95,24 @@ def _caveats(config: ExperimentConfig) -> list[str]:
                 "因此这些数字**不构成真实模型能力、成本或延迟结论**；"
                 "护栏是否有效请以「与对照组对照（A/B）」表与对照组 `config.json` 为准。"
             )
-            mechanism = (
-                "- 护栏在工具执行前拦下调用，产生 `role=guard` 的 span 与一条拒绝消息："
-                "不写库、不计入 `invalid_calls`，grader 的判分口径不因开关而改变。"
-                "**`invalid_calls` 下降不等于成功率提升**——任务脚本固有的缺陷被拦下后"
-                "依然失败，只是归因可能从 `bad_args` 变成 `unknown`；论效果应看 `pass^k`。"
-            )
+            if GUARD_IDEMPOTENCY in config.guards:
+                # 幂等护栏拦下的是工具层不报错的重复写：invalid_calls 可以
+                # 一点不变而 pass^k 提升，旧版「下降不等于提升」的措辞覆盖不了。
+                mechanism = (
+                    "- 护栏在工具执行前拦下调用，产生 `role=guard` 的 span 与一条拒绝消息："
+                    "不写库、不计入 `invalid_calls`，grader 的判分口径不因开关而改变。"
+                    "**`invalid_calls` 与成功率没有必然联系**：`schema_validation` 拦下坏参数"
+                    "会让它下降，但任务仍可能失败（归因从 `bad_args` 变成 `unknown`）；"
+                    "`idempotency` 拦下的是工具层**不报错**的重复写，`invalid_calls` 可以"
+                    "完全不变而 `pass^k` 提升。论效果只看 `pass^k`。"
+                )
+            else:
+                mechanism = (
+                    "- 护栏在工具执行前拦下调用，产生 `role=guard` 的 span 与一条拒绝消息："
+                    "不写库、不计入 `invalid_calls`，grader 的判分口径不因开关而改变。"
+                    "**`invalid_calls` 下降不等于成功率提升**——任务脚本固有的缺陷被拦下后"
+                    "依然失败，只是归因可能从 `bad_args` 变成 `unknown`；论效果应看 `pass^k`。"
+                )
         else:
             capability = (
                 "- **它没有语言理解能力**：故障是按固定规则人为注入的噪声（坏 JSON / 错参数 / "

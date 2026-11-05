@@ -59,6 +59,11 @@ def _run_trial(
     )
     counter = loop.StepCounter()
     budget = guard.StepBudget(max_steps=config.max_steps)
+    # 幂等键集合必须在整个 trial（可能跨多个 turn）共享；不开护栏时连对象
+    # 都不创建，OFF 组因此与 W1 冻结基线逐字节等价。
+    guard_state = (
+        guard.GuardState() if guard.GUARD_IDEMPOTENCY in config.guards else None
+    )
     simulator = RuleUserSimulator(
         task["user_utterances"], task.get("utterance_rules", ())
     )
@@ -87,6 +92,7 @@ def _run_trial(
             budget=budget,
             max_json_retries=config.max_json_retries,
             guards=config.guards,
+            guard_state=guard_state,
         )
         spans.extend(result.spans)
         errors.extend(result.errors)

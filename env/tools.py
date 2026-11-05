@@ -23,6 +23,11 @@ TOOL_SCHEMAS: dict[str, dict[str, tuple[str, ...]]] = {
 WRONG_TOOL = "wrong_tool"
 BAD_ARGS = "bad_args"
 
+# 会写坏领域库状态的动作。运行时幂等键护栏、判分器的 state_write 事件、
+# SeededBackend 的 duplicate_call 故障全部以此集合为唯一事实来源，
+# 避免三处各写一份而在新增工具时漏改。
+WRITE_TOOLS = frozenset({"refund_order", "cancel_order", "notify_customer"})
+
 Observation = dict[str, Any]
 
 

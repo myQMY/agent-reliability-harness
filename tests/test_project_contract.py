@@ -348,5 +348,65 @@ class TestW3GuardContract(unittest.TestCase):
                 self.assertIn(compact(phrase), stack, f"技术方案缺少 {phrase}")
 
 
+class TestW3FactorialContract(unittest.TestCase):
+    """W3 第二条护栏与 2×2 全因子：单一事实来源、确定性、诚实口径不得回潮。"""
+
+    def test_four_cells_and_matrix_report_are_versioned(self):
+        for rel in (
+            "experiments/guard_ab_off.toml",
+            "experiments/guard_ab_on.toml",
+            "experiments/guard_ab_idem.toml",
+            "experiments/guard_ab_both.toml",
+            "experiments/w3_guard_matrix.md",
+            "eval/guard_matrix.py",
+            "tests/test_idempotency_guard.py",
+        ):
+            with self.subTest(path=rel):
+                self.assertTrue((ROOT / rel).is_file(), f"缺少 {rel}")
+
+    def test_write_tool_list_has_one_definition(self):
+        self.assertIn("WRITE_TOOLS", read("env/tools.py"))
+        self.assertIn("from env import db, tools", read("eval/grader.py"))
+        self.assertIn("from env import tools", read("runtime/model.py"))
+        self.assertIn("from env import tools", read("runtime/guard.py"))
+
+    def test_idempotency_key_is_hash_based_and_clock_free(self):
+        source = read("runtime/guard.py")
+        for phrase in (
+            "GUARD_IDEMPOTENCY", "GuardState", "idempotency_key",
+            "hashlib.sha256", "record_write", "sort_keys=True",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, source)
+        for banned in ("uuid", "time.time", "random.random"):
+            with self.subTest(banned=banned):
+                self.assertNotIn(banned, source)
+
+    def test_matrix_module_is_read_only_and_clock_free(self):
+        source = read("eval/guard_matrix.py")
+        for phrase in (
+            "effects_of", "build_matrix", "render_matrix",
+            "difference-in-differences", "不是显著性检验",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, source)
+        self.assertNotIn("datetime", source)
+        self.assertNotIn("time.", source)
+
+    def test_guard_state_is_wired_into_loop_and_runner(self):
+        self.assertIn("guard_state", read("runtime/loop.py"))
+        self.assertIn("guard_state", read("eval/runner.py"))
+
+    def test_docs_describe_factorial_honestly(self):
+        readme = compact(read("README.md"))
+        stack = compact(read("docs/tech-stack.md"))
+        for phrase in ("2×2", "idempotency", "w3_guard_matrix.md", "交互"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(compact(phrase), readme, f"README 缺少 {phrase}")
+        for phrase in ("idempotency", "2×2", "交互", "不构成"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(compact(phrase), stack, f"技术方案缺少 {phrase}")
+
+
 if __name__ == "__main__":
     unittest.main()

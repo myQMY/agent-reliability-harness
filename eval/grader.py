@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from env import db
+from env import db, tools
 from runtime.loop import (
     RETRY_HINT,
     TERMINATION_FINAL,
@@ -30,7 +30,8 @@ FAILURE_TYPES = (
 )
 NO_FAILURE = "none"
 
-WRITE_TOOLS = frozenset({"refund_order", "cancel_order", "notify_customer"})
+# 与运行时护栏、故障注入共用同一份写工具清单，新增工具时只允许改一处
+WRITE_TOOLS = tools.WRITE_TOOLS
 
 CheckResult = tuple[bool, str]
 Divergence = dict[str, Any] | None

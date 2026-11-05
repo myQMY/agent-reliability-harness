@@ -100,16 +100,20 @@ def run_turn(
     budget: guard.StepBudget,
     max_json_retries: int = guard.MAX_JSON_RETRIES,
     guards: tuple[str, ...] = (),
+    guard_state: guard.GuardState | None = None,
 ) -> TurnResult:
     """跑一轮对话，直到模型给出 final 或触发护栏。
 
     max_json_retries / guards 由实验配置注入，默认值与 W1 冻结基线一致：
-    不传时行为完全不变，护栏全部关闭。
+    不传时行为完全不变，护栏全部关闭。``guard_state`` 是 idempotency 护栏
+    专用的跨 turn 状态，由 runner 在一次 trial 里创建并复用；不传则为 None，
+    该护栏不生效，因此只开 schema_validation 的既有留档逐字节不变。
 
     护栏拦截只发生在工具执行之前：拦下时不调 tools.call（不写库、不计入
     errors），而是把 ``GUARD_REJECT_PREFIX`` 消息追加进 messages，让后端
     有机会重发正确调用。guard span 只作证据，grader 不消费这个 role，
-    因此判分口径不因开启护栏而改变。
+    因此判分口径不因开启护栏而改变。两条护栏共用同一拦截预算，判定顺序
+    固定为 schema_validation → idempotency，避免结果依赖集合遍历顺序。
     """
     result = TurnResult()
     consecutive_format_errors = 0
@@ -158,26 +162,33 @@ def run_turn(
 
         name = action["tool"]
         args = action.get("args", {})
-        if (
-            guard.GUARD_SCHEMA_VALIDATION in guards
-            and guard_rejections < guard.MAX_GUARD_REJECTIONS
-        ):
-            rejection = guard.rejection_message(name, args)
-            if rejection is not None:
-                guard_rejections += 1
-                result.spans.append(
-                    make_span(
-                        trial_id,
-                        counter.next(),
-                        "guard",
-                        tool=name,
-                        args=args,
-                        observation=rejection,
-                    )
+        rejection = None
+        if guard_rejections < guard.MAX_GUARD_REJECTIONS:
+            if guard.GUARD_SCHEMA_VALIDATION in guards:
+                rejection = guard.rejection_message(name, args)
+            if (
+                rejection is None
+                and guard.GUARD_IDEMPOTENCY in guards
+                and guard_state is not None
+            ):
+                rejection = guard.idempotency_rejection(name, args, guard_state)
+        if rejection is not None:
+            guard_rejections += 1
+            result.spans.append(
+                make_span(
+                    trial_id,
+                    counter.next(),
+                    "guard",
+                    tool=name,
+                    args=args,
+                    observation=rejection,
                 )
-                messages.append({"role": "user", "content": rejection})
-                continue
+            )
+            messages.append({"role": "user", "content": rejection})
+            continue
         observation, error = tools.call(name, args, conn)
+        if error is None:
+            guard.record_write(name, args, guard_state)
         result.spans.append(
             make_span(
                 trial_id,
