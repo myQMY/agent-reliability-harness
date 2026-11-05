@@ -26,12 +26,19 @@ BAD_ARGS = "bad_args"
 Observation = dict[str, Any]
 
 
-def _validate(name: str, args: Any) -> str | None:
-    if name not in TOOL_SCHEMAS:
-        return WRONG_TOOL
+def validate_args(name: str, args: Any) -> str | None:
+    """只校验参数 schema，不判定工具名是否存在。
+
+    工具层与 W3 运行时护栏共用这一份规则：护栏的价值不在于「多查了什么」，
+    而在于把同样的检查从「工具层报错后放任动作丢失」前移到「拦下并触发重发」。
+    未知工具名返回 None（放行），由调用方决定是否判定 wrong_tool。
+    """
+    schema = TOOL_SCHEMAS.get(name)
+    if schema is None:
+        return None
     if not isinstance(args, dict):
         return BAD_ARGS
-    for field in TOOL_SCHEMAS[name]["required"]:
+    for field in schema["required"]:
         if field not in args or args[field] is None:
             return BAD_ARGS
     if name == "refund_order" and (
@@ -42,6 +49,12 @@ def _validate(name: str, args: Any) -> str | None:
     if name == "notify_customer" and not isinstance(args["message"], str):
         return BAD_ARGS
     return None
+
+
+def _validate(name: str, args: Any) -> str | None:
+    if name not in TOOL_SCHEMAS:
+        return WRONG_TOOL
+    return validate_args(name, args)
 
 
 def _fetchone(conn: sqlite3.Connection, sql: str, params: tuple) -> dict | None:

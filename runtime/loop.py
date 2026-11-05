@@ -99,14 +99,21 @@ def run_turn(
     counter: StepCounter,
     budget: guard.StepBudget,
     max_json_retries: int = guard.MAX_JSON_RETRIES,
+    guards: tuple[str, ...] = (),
 ) -> TurnResult:
-    """跑一轮对话，直到模型给出 final 或触发两条护栏之一。
+    """跑一轮对话，直到模型给出 final 或触发护栏。
 
-    max_json_retries 由实验配置注入；不传时沿用 MVP 默认值，
-    保证既有验收命令与冻结基线的行为完全不变。
+    max_json_retries / guards 由实验配置注入，默认值与 W1 冻结基线一致：
+    不传时行为完全不变，护栏全部关闭。
+
+    护栏拦截只发生在工具执行之前：拦下时不调 tools.call（不写库、不计入
+    errors），而是把 ``GUARD_REJECT_PREFIX`` 消息追加进 messages，让后端
+    有机会重发正确调用。guard span 只作证据，grader 不消费这个 role，
+    因此判分口径不因开启护栏而改变。
     """
     result = TurnResult()
     consecutive_format_errors = 0
+    guard_rejections = 0
     while True:
         if not budget.take():
             result.termination = TERMINATION_MAX_STEPS
@@ -151,6 +158,25 @@ def run_turn(
 
         name = action["tool"]
         args = action.get("args", {})
+        if (
+            guard.GUARD_SCHEMA_VALIDATION in guards
+            and guard_rejections < guard.MAX_GUARD_REJECTIONS
+        ):
+            rejection = guard.rejection_message(name, args)
+            if rejection is not None:
+                guard_rejections += 1
+                result.spans.append(
+                    make_span(
+                        trial_id,
+                        counter.next(),
+                        "guard",
+                        tool=name,
+                        args=args,
+                        observation=rejection,
+                    )
+                )
+                messages.append({"role": "user", "content": rejection})
+                continue
         observation, error = tools.call(name, args, conn)
         result.spans.append(
             make_span(

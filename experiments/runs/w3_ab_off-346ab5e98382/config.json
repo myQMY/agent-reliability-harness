@@ -1,0 +1,1 @@
+{"config":{"backend":"seeded","compare":"experiments/baseline/result_rows.jsonl","fault_per_mille":60,"k":3,"max_json_retries":2,"max_steps":12,"name":"w3_ab_off","seed":11,"tasks":"tasks/mvp_10.jsonl"},"run_id":"w3_ab_off-346ab5e98382"}

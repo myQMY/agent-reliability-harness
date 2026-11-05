@@ -1,7 +1,7 @@
 # 实验结果：baseline_scripted / `baseline_scripted-a346e8acef15`
 
 > 本表由 `python -m eval.run` 依据结果行如实生成，数字未修饰。
-> 生效配置来自 `experiments/config.toml` 与显式 CLI 覆盖；留档模式下同目录另有 `config.json` 存证。`run_id` 由配置摘要确定性生成，同配置必得同一 `run_id`。
+> 生效配置来自实验配置文件与显式 CLI 覆盖；留档模式下同目录另有 `config.json` 存证。`run_id` 由配置摘要确定性生成，同配置必得同一 `run_id`。
 
 ## 运行配置
 

@@ -5,7 +5,7 @@
 
 实验输入以 experiments/config.toml 为唯一事实来源，CLI 显式参数只覆盖对应字段；
 最终生效配置决定 run_id。不传 --report 时留档到 <runs-dir>/<run_id>/
-（report.md + config.json）；冻结基线 experiments/mvp_baseline.md 永不被写入。
+（report.md + config.json + result_rows.jsonl）；冻结基线 experiments/mvp_baseline.md 永不被写入。
 """
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from pathlib import Path
 from eval import analyze
 from eval import config as exp_config
 from eval import runner, trace
+from runtime.guard import GUARD_NAMES
 from runtime.model import BackendConfig, config_from_env
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -52,6 +53,10 @@ def build_parser() -> argparse.ArgumentParser:
     # 仅 backend = seeded 时生效；不传则由 [seeded] 配置段决定
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--fault-per-mille", type=int, default=None)
+    # W3 起的可开关护栏；与 [guards].enabled 合并去重，白名单由 choices 与 validate 双重把守
+    parser.add_argument(
+        "--guard", action="append", choices=GUARD_NAMES, default=None
+    )
     parser.add_argument("--results-dir", type=Path, default=Path("results"))
     parser.add_argument("--traces-dir", type=Path, default=Path("traces"))
     parser.add_argument(
@@ -69,8 +74,10 @@ def main(argv: list[str] | None = None) -> int:
             "拒绝写入冻结基线 experiments/mvp_baseline.md；"
             "请换一个 --report 路径或不传 --report 使用留档模式"
         )
+    base_cfg = exp_config.load_config(args.config)
+    merged_guards = tuple(dict.fromkeys([*base_cfg.guards, *(args.guard or ())]))
     cfg = exp_config.with_overrides(
-        exp_config.load_config(args.config),
+        base_cfg,
         # as_posix() 保持分隔符稳定，避免 Windows 上 "/" 变 "\\" 后
         # 与 config.toml 里的同义路径算出不同的 run_id
         tasks=args.tasks.as_posix() if args.tasks is not None else None,
@@ -78,6 +85,7 @@ def main(argv: list[str] | None = None) -> int:
         backend=args.backend,
         seed=args.seed,
         fault_per_mille=args.fault_per_mille,
+        guards=merged_guards,
     )
     rid = exp_config.run_id(cfg)
 
@@ -100,6 +108,7 @@ def main(argv: list[str] | None = None) -> int:
         traces_dir=args.traces_dir,
         max_steps=cfg.max_steps,
         max_json_retries=cfg.max_json_retries,
+        guards=cfg.guards,
     )
     rows = runner.run(run_config)
     tasks = runner.load_tasks(tasks_path)
@@ -133,6 +142,11 @@ def main(argv: list[str] | None = None) -> int:
         run_dir.mkdir(parents=True, exist_ok=True)
         snapshot = trace.dumps(exp_config.config_snapshot(cfg, rid)) + "\n"
         (run_dir / "config.json").write_bytes(snapshot.encode("utf-8"))
+        # 结果行作为可复现证据入库，也让后续实验能把本次当作对照组
+        # （compare 指向 <run_id>/result_rows.jsonl 即为同后端 A/B）。
+        (run_dir / "result_rows.jsonl").write_bytes(
+            (args.results_dir / "result_rows.jsonl").read_bytes()
+        )
         report_path = run_dir / "report.md"
         report_path.write_bytes(report.encode("utf-8"))
 

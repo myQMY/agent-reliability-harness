@@ -5,10 +5,11 @@
 run_id 由配置摘要确定性生成，不含时间戳 / 随机值 / 机器路径，
 保证「同配置 → 同 run_id → 同报告」，也保证不同配置落到不同目录。
 
-_seed 兼容约定（W2.5）：seed / fault_per_mille 只对 SeededBackend 生效。
-为避免给默认 scripted 配置增加字段就改变 W1 冻结留档的 run_id，
-fingerprint 与 config_snapshot 统一走 _core()：非 seeded 后端下
-摘要只含原有 7 个字段，逐字节与 W1 一致；只有 seeded 才并入这两个字段。
+摘要兼容约定：W1 冻结留档的 run_id 由原有 7 个字段算出，新增配置字段
+不得改变它。fingerprint 与 config_snapshot 统一走 _core()：seed /
+fault_per_mille 只在 backend=seeded 时并入，guards 只在非空时并入。
+因此「全部关闭」的配置摘要逐字节等于 W1 / W2.5，开启任一护栏才分叉出
+新 run_id——这正是 W3 单变量 A/B 需要的性质。
 """
 from __future__ import annotations
 
@@ -19,12 +20,14 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from runtime.guard import GUARD_NAMES
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = REPO_ROOT / "experiments" / "config.toml"
 
 _SECTION_FIELDS: dict[str, set[str]] = {
     "experiment": {"name", "tasks", "k", "backend", "compare"},
-    "guards": {"max_steps", "max_json_retries"},
+    "guards": {"max_steps", "max_json_retries", "enabled"},
     "seeded": {"seed", "fault_per_mille"},
 }
 
@@ -54,6 +57,8 @@ class ExperimentConfig:
     # 仅 backend == "seeded" 时生效；scripted / openai 下忽略
     seed: int = 0
     fault_per_mille: int = 0
+    # W3 起的可开关运行时护栏；空元组 = 全部关闭（OFF 组），与 W1 行为逐字等价
+    guards: tuple[str, ...] = ()
 
     def validate(self) -> None:
         if not self.name or any(
@@ -72,6 +77,13 @@ class ExperimentConfig:
             raise ValueError("[seeded].seed 必须 >= 0")
         if not 0 <= self.fault_per_mille <= 1000:
             raise ValueError("[seeded].fault_per_mille 必须落在 0..1000")
+        unknown_guards = [name for name in self.guards if name not in GUARD_NAMES]
+        if unknown_guards:
+            raise ValueError(
+                f"未知护栏 {unknown_guards}；已实现：{list(GUARD_NAMES)}"
+            )
+        if len(set(self.guards)) != len(self.guards):
+            raise ValueError("[guards].enabled 不得包含重复护栏名")
         if not self.tasks:
             raise ValueError("tasks 不得为空（compare 允许留空以关闭对照）")
 
@@ -96,6 +108,11 @@ def load_config(path: Path | None = None) -> ExperimentConfig:
     experiment = raw.get("experiment", {})
     guards = raw.get("guards", {})
     seeded = raw.get("seeded", {})
+    enabled = guards.get("enabled", ())
+    if not isinstance(enabled, (list, tuple)) or any(
+        not isinstance(item, str) for item in enabled
+    ):
+        raise ValueError("[guards].enabled 必须是护栏名数组")
     config = ExperimentConfig(
         name=experiment.get("name", _DEFAULTS.name),
         tasks=experiment.get("tasks", _DEFAULTS.tasks),
@@ -110,6 +127,7 @@ def load_config(path: Path | None = None) -> ExperimentConfig:
         fault_per_mille=seeded.get(
             "fault_per_mille", _DEFAULTS.fault_per_mille
         ),
+        guards=tuple(enabled),
     )
     config.validate()
     return config
@@ -135,6 +153,10 @@ def _core(config: ExperimentConfig) -> dict[str, Any]:
     if config.backend == "seeded":
         payload["seed"] = config.seed
         payload["fault_per_mille"] = config.fault_per_mille
+    # 护栏开关是 W3 的实验自变量：开启后必须落到新 run_id，
+    # 关闭时完全不进摘要，保证两个既有留档的 run_id / config.json 逐字节不变。
+    if config.guards:
+        payload["guards"] = list(config.guards)
     return payload
 
 

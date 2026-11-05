@@ -31,6 +31,8 @@ class RunConfig:
     # 护栏值来自实验配置（eval/config.py）；默认值与冻结基线一致
     max_steps: int = guard.MAX_STEPS
     max_json_retries: int = guard.MAX_JSON_RETRIES
+    # W3 起的可开关护栏；空元组表示全部关闭（OFF 组），逐字等价 W1 行为
+    guards: tuple[str, ...] = ()
 
 
 def load_tasks(path: Path) -> list[Task]:
@@ -84,6 +86,7 @@ def _run_trial(
             counter=counter,
             budget=budget,
             max_json_retries=config.max_json_retries,
+            guards=config.guards,
         )
         spans.extend(result.spans)
         errors.extend(result.errors)

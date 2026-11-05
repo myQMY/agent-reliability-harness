@@ -27,6 +27,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Protocol, Sequence
 
+from runtime import guard
+
 SYSTEM_PROMPT = (
     "你是一个零售业务 Agent。每次回复只能输出一个 JSON 对象，不要输出多余文字。"
     '调用工具：{"tool": "<工具名>", "args": {...}}；'
@@ -34,10 +36,9 @@ SYSTEM_PROMPT = (
     "工具名必须来自可用工具列表，args 必须包含该工具要求的全部字段。"
 )
 
-# W3 护栏预留接口：护栏拦下一次工具调用后，把该前缀写进 messages，
-# SeededBackend 会重发被替换掉的干净意图动作，形成「拦下 → 改对」的可测量链路。
-# 本轮只预留这个协议，不实现任何护栏；运行时的 RETRY_HINT / 工具报错不触发纠正。
-GUARD_REJECT_PREFIX = "[GUARD-REJECT]"
+# 护栏协议的权威定义在 runtime/guard.py；这里 re-export 保持既有导入路径，
+# 避免测试与调用方因常量搬家而失效。运行时的 RETRY_HINT / 工具报错不触发纠正。
+GUARD_REJECT_PREFIX = guard.GUARD_REJECT_PREFIX
 
 # 会写坏领域库状态的动作，duplicate_call 故障只重放这些。
 _SEEDED_WRITE_TOOLS = frozenset(
@@ -134,8 +135,9 @@ class SeededBackend:
 
     注入时只替换本次返回的文本，cursor 恒前进 1 步，且每个 cursor 至多
     注入一次；故障不会吃光 MAX_STEPS，也不会让后端卡在原地。被替换掉的
-    干净动作存为 ``_pending_correct``，只有 messages 末条以
-    ``GUARD_REJECT_PREFIX`` 开头时才重发（W3 护栏预留接口）。
+    干净动作存为 ``_pending_correct``：只有紧邻的下一次 generate 且 messages
+    末条以 ``GUARD_REJECT_PREFIX`` 开头时才重发，形成 W3「拦下 → 改对」链路。
+    纠正机会只活一次，避免历史干净动作被后续无关的拦截误触发。
 
     任务脚本里固有的 6 类缺陷（坏 JSON、错工具、缺参数、超退等）原样保留：
     解析不成动作对象的脚本项不参与注入。ModelReply 三个观测值恒 0。
@@ -208,15 +210,17 @@ class SeededBackend:
             self._issued_writes.append(clean)
 
     def generate(self, messages: list[dict[str, str]]) -> ModelReply:
-        # W3 预留：护栏拦下后重发被替换的干净动作；只认末条，避免重复触发。
+        # 护栏拦下后重发被替换的干净动作；只认末条，且纠正机会只在紧邻的
+        # 下一次 generate 有效。否则一次 wrong_tool 故障残留下来的干净动作，
+        # 会被后面某次无关的护栏拦截误触发，让 A/B 结果失去可解释性。
+        pending = self._pending_correct
+        self._pending_correct = None
         if (
-            self._pending_correct is not None
+            pending is not None
             and messages
             and messages[-1].get("content", "").startswith(GUARD_REJECT_PREFIX)
         ):
-            clean = self._pending_correct
-            self._pending_correct = None
-            return ModelReply(text=clean)
+            return ModelReply(text=pending)
 
         if not self._script:
             return ModelReply(text="")

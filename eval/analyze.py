@@ -87,14 +87,36 @@ def _caveats(config: ExperimentConfig) -> list[str]:
             "这是保持产物确定性的零值，**不是成本数据**，不能据此下成本或延迟结论。",
         ] + common_tail
     if config.backend == "seeded":
-        return common_head + [
+        if config.guards:
+            capability = (
+                "- **本次已开启运行时护栏**（名称见「运行配置」）：本表是 W3 单变量对照的"
+                "实验组结果，不再是纯校准。模拟器仍**没有语言理解能力**，注入的仍是人为噪声，"
+                "因此这些数字**不构成真实模型能力、成本或延迟结论**；"
+                "护栏是否有效请以「与对照组对照（A/B）」表与对照组 `config.json` 为准。"
+            )
+            mechanism = (
+                "- 护栏在工具执行前拦下调用，产生 `role=guard` 的 span 与一条拒绝消息："
+                "不写库、不计入 `invalid_calls`，grader 的判分口径不因开关而改变。"
+                "**`invalid_calls` 下降不等于成功率提升**——任务脚本固有的缺陷被拦下后"
+                "依然失败，只是归因可能从 `bad_args` 变成 `unknown`；论效果应看 `pass^k`。"
+            )
+        else:
+            capability = (
+                "- **它没有语言理解能力**：故障是按固定规则人为注入的噪声（坏 JSON / 错参数 / "
+                "错工具 / 重复写），任务脚本里固有的缺陷原样保留。本表数字只校准测量链路，"
+                "**不构成任何模型能力、成本或延迟结论**，也不是 W3 护栏的对照结果。"
+            )
+            mechanism = ""
+        head = common_head + [
             "- SeededBackend 是**确定性伪随机模拟器**：RNG 由 `(seed, task_id, trial, cursor)` "
             "经 SHA256 派生，不使用时间、UUID 或全局随机源，因此同配置连跑两次仍逐字节一致。",
             "- 不同 trial 的 RNG 流互相独立，所以同一任务 k 次结果可能不同；"
             "**pass^k 在本后端下首次具备区分度**，可用于校准「偶尔成功」的测量链路。",
-            "- **它没有语言理解能力**：故障是按固定规则人为注入的噪声（坏 JSON / 错参数 / "
-            "错工具 / 重复写），任务脚本里固有的缺陷原样保留。本表数字只校准测量链路，"
-            "**不构成任何模型能力、成本或延迟结论**，也不是 W3 护栏的对照结果。",
+            capability,
+        ]
+        if mechanism:
+            head.append(mechanism)
+        return head + [
             "- `tokens` / `latency_ms` 恒为 0：模拟器不产生真实模型调用，"
             "这是保持产物确定性的零值，**不是成本数据**。",
         ] + common_tail
@@ -108,30 +130,48 @@ def _caveats(config: ExperimentConfig) -> list[str]:
     ] + common_tail
 
 
+FROZEN_COMPARE = "experiments/baseline/result_rows.jsonl"
+
+
 def _comparison_lines(
     summary: dict[str, Any],
     baseline_rows: list[Row],
     k: int,
     cross_backend: bool = False,
+    compare_path: str = FROZEN_COMPARE,
 ) -> list[str]:
     base_k = max((row["trial"] for row in baseline_rows), default=k)
     base = summarize(baseline_rows, base_k)
-    lines = [
-        "## 与冻结基线对照",
-        "",
-        f"> 基线来自 `experiments/baseline/result_rows.jsonl`（W1 冻结，k={base_k}）；"
-        "本报告不修改该文件。",
-    ]
-    if cross_backend:
-        lines += [
+    is_frozen = compare_path == FROZEN_COMPARE
+    if is_frozen:
+        lines = [
+            "## 与冻结基线对照",
             "",
-            "> ⚠️ **本次后端与冻结基线不同，本表只是数值罗列，不是消融实验。** "
-            "差异来自后端替换（含人为注入的故障），不能作为 harness 或护栏有效性的因果证据；"
-            "单变量对照必须在同一后端下、一次只改一个变量进行。",
+            f"> 基线来自 `experiments/baseline/result_rows.jsonl`（W1 冻结，k={base_k}）；"
+            "本报告不修改该文件。",
         ]
+        if cross_backend:
+            lines += [
+                "",
+                "> ⚠️ **本次后端与冻结基线不同，本表只是数值罗列，不是消融实验。** "
+                "差异来自后端替换（含人为注入的故障），不能作为 harness 或护栏有效性的因果证据；"
+                "单变量对照必须在同一后端下、一次只改一个变量进行。",
+            ]
+        column = "冻结基线"
+    else:
+        # W3 A/B：对照组是另一次跑批（通常是同后端、只差护栏开关）。
+        # 不再套用「冻结基线」的措辞，也不加跨后端警告，但必须提醒读者自己核对单变量。
+        lines = [
+            "## 与对照组对照（A/B）",
+            "",
+            f"> 对照组结果行来自 `{compare_path}`（k={base_k}）；本报告不修改该文件。",
+            "> 是否构成**单变量对照**请以两份 `config.json` 为准：只有目标变量不同，"
+            "本表的差异才能作因果解读。",
+        ]
+        column = "对照组"
     lines += [
         "",
-        "| 指标 | 冻结基线 | 本次 | 变化 |",
+        f"| 指标 | {column} | 本次 | 变化 |",
         "| --- | --- | --- | --- |",
     ]
     metrics = (
@@ -203,9 +243,14 @@ def render_report(
     for task in tasks:
         text = task["user_utterances"][0]
         briefs[task["id"]] = text[:24] + ("…" if len(text) > 24 else "")
+    seeded_label = (
+        "SeededBackend（确定性伪随机模拟器，W3 单变量对照实验）"
+        if config.guards
+        else "SeededBackend（确定性伪随机模拟器，仅用于校准测量链路）"
+    )
     backend_name = {
         "scripted": "ScriptedBackend（确定性脚本）",
-        "seeded": "SeededBackend（确定性伪随机模拟器，仅用于校准测量链路）",
+        "seeded": seeded_label,
         "openai": "OpenAIBackend",
     }[config.backend]
     seeded_rows = (
@@ -214,6 +259,12 @@ def render_report(
             f"| 故障注入率 | {config.fault_per_mille}/1000 |",
         ]
         if config.backend == "seeded"
+        else []
+    )
+    # 只在开启护栏时才加行：OFF 组与 W1 / W2.5 的既有报告逐字节不变
+    guard_rows = (
+        [f"| 已开启护栏 | {', '.join(f'`{name}`' for name in config.guards)} |"]
+        if config.guards
         else []
     )
     lines = [
@@ -231,6 +282,7 @@ def render_report(
         f"| run_id | `{rid}` |",
         f"| 后端 | {backend_name} |",
         *seeded_rows,
+        *guard_rows,
         f"| 任务集 | `{config.tasks}` |",
         f"| 任务数 | {summary['task_count']} |",
         f"| k | {summary['k']} |",
@@ -282,6 +334,7 @@ def render_report(
             baseline_rows,
             config.k,
             cross_backend=config.backend != "scripted",
+            compare_path=config.compare,
         )
     reproduce = "python -m eval.run"
     if config_path:
@@ -295,6 +348,16 @@ def render_report(
         )
     elif config.backend == "openai":
         reproduce += " --backend openai"
+    for name in config.guards:
+        reproduce += f" --guard {name}"
+    next_step = (
+        "做 W3 单变量对照时，只改一个配置字段（如 `[guards].enabled`），把 `compare` "
+        "指向对照组的 `result_rows.jsonl`；重跑会生成新的 `run_id` 与独立报告，"
+        "用「与对照组对照（A/B）」表判断改动是否真的有效。"
+        if config.guards
+        else "做单变量对照实验时，只改 `experiments/config.toml` 中的一个字段，"
+        "重跑后会生成新的 `run_id` 与独立报告；用「与冻结基线对照」表判断这次改动是否真的有效。"
+    )
     lines += [
         "",
         "## 复现",
@@ -309,9 +372,7 @@ def render_report(
         "",
         "## 下一步",
         "",
-        "做单变量对照实验时，只改 `experiments/config.toml` 中的一个字段，"
-        "重跑后会生成新的 `run_id` 与独立报告；用「与冻结基线对照」表判断这次改动是否真的有效。"
-        "不要为了好看而修饰基线。",
+        next_step + "不要为了好看而修饰基线。",
         "",
     ]
     return "\n".join(lines)

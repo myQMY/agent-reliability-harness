@@ -15,6 +15,9 @@ compare = "experiments/baseline/result_rows.jsonl"
 # MVP 已有的两条护栏，此处只做参数化，默认值与冻结基线一致
 max_steps = 12
 max_json_retries = 2
+# W3 起可在此写 enabled 数组来开启运行时护栏（如 schema_validation）。
+# 默认故意不写 = 全部关闭：开启任一护栏都会改变 run_id，
+# 单变量实验必须用独立配置文件，见 experiments/guard_ab_off.toml / guard_ab_on.toml。
 
 # [seeded] 段只有 backend = "seeded" 时才生效，因此故意不在默认配置里写它：
 # 加上任何字段都会改变 run_id，而本文件是 W1 冻结基线的等价配置。

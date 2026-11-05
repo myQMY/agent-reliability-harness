@@ -1,0 +1,25 @@
+# W3 单变量 A/B 对照组：运行时护栏全部关闭。
+#
+# 与 guard_ab_on.toml 相比，测量输入（tasks / k / backend / seed /
+# fault_per_mille / max_steps / max_json_retries）完全相同，唯一实验变量是
+# [guards].enabled。两份配置的 name 与 compare 不同，但这两个字段只决定
+# 报告落盘位置与对照表来源，不进入测量链路；tests/test_schema_guard.py 会
+# 逐字段断言这一点，防止有人偷偷改了别的变量还声称是单变量实验。
+#
+# 复现：python -m eval.run --config experiments/guard_ab_off.toml
+[experiment]
+name = "w3_ab_off"
+tasks = "tasks/mvp_10.jsonl"
+k = 3
+backend = "seeded"
+compare = "experiments/baseline/result_rows.jsonl"
+
+[guards]
+max_steps = 12
+max_json_retries = 2
+# 空数组 = OFF 组。留空时 guards 不进配置摘要，run_id 与 W2.5 口径一致。
+enabled = []
+
+[seeded]
+seed = 11
+fault_per_mille = 60

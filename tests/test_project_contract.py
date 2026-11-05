@@ -301,5 +301,52 @@ class TestW2MeasurementContract(unittest.TestCase):
                 self.assertIn(compact(phrase), stack, f"技术方案缺少 {phrase}")
 
 
+class TestW3GuardContract(unittest.TestCase):
+    """W3 第一条护栏：开关必须可配置、对照必须单变量、口径必须诚实。"""
+
+    def test_guard_switch_is_config_driven(self):
+        for path, phrases in (
+            ("runtime/guard.py", ("GUARD_NAMES", "GUARD_REJECT_PREFIX", "validate_args", "MAX_GUARD_REJECTIONS")),
+            ("runtime/loop.py", ("guards", "rejection_message", "\"guard\"")),
+            ("eval/config.py", ("guards", "GUARD_NAMES")),
+            ("eval/run.py", ("--guard", "merged_guards")),
+        ):
+            source = read(path)
+            for phrase in phrases:
+                with self.subTest(path=path, phrase=phrase):
+                    self.assertIn(phrase, source, f"{path} 缺少 {phrase}")
+
+    def test_ab_configs_are_versioned_and_differ_only_in_enabled(self):
+        off = read("experiments/guard_ab_off.toml")
+        on = read("experiments/guard_ab_on.toml")
+        self.assertIn("enabled = []", off)
+        self.assertIn('enabled = ["schema_validation"]', on)
+        self.assertNotIn("schema_validation", off, "对照组不得开启任何护栏")
+        for text in (off, on):
+            self.assertIn('backend = "seeded"', text)
+            self.assertIn("seed = 11", text)
+            self.assertIn("fault_per_mille = 60", text)
+
+    def test_default_config_keeps_all_guards_off(self):
+        """默认路径开启护栏会悄悄改变 W1 冻结基线的可比性。"""
+        self.assertNotIn("enabled = [\"", read("experiments/config.toml"))
+
+    def test_report_does_not_sell_invalid_calls_as_improvement(self):
+        source = read("eval/analyze.py")
+        for phrase in ("下降不等于成功率提升", "与对照组对照（A/B）", "单变量对照"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, source)
+
+    def test_docs_describe_w3_honestly(self):
+        readme = compact(read("README.md"))
+        stack = compact(read("docs/tech-stack.md"))
+        for phrase in ("schema_validation", "单变量", "与对照组对照", "guard_ab_on.toml"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(compact(phrase), readme, f"README 缺少 {phrase}")
+        for phrase in ("schema_validation", "单变量", "不构成"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(compact(phrase), stack, f"技术方案缺少 {phrase}")
+
+
 if __name__ == "__main__":
     unittest.main()
