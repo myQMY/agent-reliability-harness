@@ -2,6 +2,10 @@
 
 其余护栏（参数校验、幂等、上下文压缩、预算、审批、退避）按设计文档 §7
 留给 W3 作为单变量对照实验的自变量，这里一律不加。
+
+token / 延迟观测不在这里：它们由 Backend.generate 返回的 ModelReply 提供，
+ScriptedBackend 恒为 0（确定性），OpenAIBackend 为真实值。护栏与观测分离，
+避免有人为了「看起来有成本数据」而往产物里塞假数字。
 """
 from __future__ import annotations
 
@@ -9,11 +13,6 @@ from dataclasses import dataclass
 
 MAX_STEPS = 12
 MAX_JSON_RETRIES = 2
-
-# ScriptedBackend 不产生真实 token 与耗时，统一记为占位常量。
-# 这是「逐字节一致」验收项的一部分，不代表真实模型开销。
-SCRIPTED_TOKENS = 0
-SCRIPTED_LATENCY_MS = 0
 
 
 @dataclass

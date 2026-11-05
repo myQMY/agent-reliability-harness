@@ -75,20 +75,24 @@ def _caveats(config: ExperimentConfig) -> list[str]:
     ]
     common_tail = [
         "- 无效工具调用率 = 工具层报错次数 / 总步数，来自 trace 的事件计数。",
-        "- `tokens` / `latency_ms` 当前在所有后端下都是 0：ScriptedBackend 使用占位常量，"
-        "OpenAIBackend 尚未接入 usage 观测（W2 待办），因此成本与延迟结论暂不成立。",
+        "- 失败归因取 trace 中**首个**可判定偏离点作主归因；并列原因与偏离点证据写入"
+        "结果行的 `reasons` / `first_divergence`，判不出时如实记为 `unknown`。",
     ]
     if config.backend == "scripted":
         return common_head + [
             "- ScriptedBackend 是确定性脚本，同一任务 k 次结果完全一致，"
             "因此本次 **pass^k 与 pass¹ 必然相等**；pass^k 暴露「偶尔成功」的能力"
-            "要等 W2 接入真实模型后才显现。这一相等不是缺陷，是测量链路确定性的证据。",
+            "要等接入真实模型后才显现。这一相等不是缺陷，是测量链路确定性的证据。",
+            "- `tokens` / `latency_ms` 恒为 0：脚本后端不产生真实模型调用，"
+            "这是保持产物确定性的零值，**不是成本数据**，不能据此下成本或延迟结论。",
         ] + common_tail
     return common_head + [
         "- OpenAIBackend 调用真实模型，同一任务 k 次结果可能不同；"
         "pass^k 此时才真正用于暴露「偶尔成功」。",
         "- 结果受模型服务影响，不保证逐字节可复现；"
         "「同配置连跑两次逐字节一致」这一验收项仅在 ScriptedBackend 下成立。",
+        "- `tokens` 来自响应的 `usage`（prompt + completion），`latency_ms` 是单次调用的"
+        "墙钟耗时取整；两者是真实观测，但**不参与判分**，且随服务波动。",
     ] + common_tail
 
 
@@ -122,6 +126,42 @@ def _comparison_lines(
         before = base["failure_counts"].get(name, 0)
         after = summary["failure_counts"].get(name, 0)
         lines.append(f"| {name} | {before} | {after} | {after - before:+d} |")
+    return lines
+
+
+def _attribution_lines(rows: list[Row]) -> list[str]:
+    """按任务列出首个失败 trial 的归因证据；完整证据在结果行里。"""
+    lines = [
+        "## 归因证据（首个偏离点）",
+        "",
+        "> 主归因取 trace 中按 step 顺序的第一个可判定偏离点；这里每个任务只列首个失败 trial，"
+        "全部 trial 的证据见结果行的 `reasons` / `first_divergence`。",
+        "",
+        "| task_id | trial_id | 主归因 | 偏离点 | 并列原因 |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    seen: set[str] = set()
+    for row in sorted(rows, key=lambda item: (item["task_id"], item["trial"])):
+        if row["passed"] or row["task_id"] in seen:
+            continue
+        seen.add(row["task_id"])
+        divergence = row.get("first_divergence")
+        if isinstance(divergence, dict):
+            anchor = (
+                f"step {divergence['step']} / {divergence['kind']} / "
+                f"{divergence.get('detail') or '-'}"
+            )
+        else:
+            anchor = "—"
+        reasons = ", ".join(row.get("reasons", ())) or "—"
+        lines.append(
+            f"| {row['task_id']} | `{row['trial_id']}` | {row['failure_type']} | "
+            f"{anchor} | {reasons.replace('|', '｜')} |"
+        )
+    if not seen:
+        lines.append("| — | — | — | — | 本次没有失败 trial |")
+    elif not any("first_divergence" in row for row in rows):
+        lines.append("| — | — | — | — | 结果行为旧版 schema，未携带归因证据 |")
     return lines
 
 
@@ -201,6 +241,7 @@ def render_report(
             f"{'是' if item['all_pass'] else '否'} | {item['failure_type']} | "
             f"{item['avg_steps']:.2f} |"
         )
+    lines += [""] + _attribution_lines(rows)
     if baseline_rows is not None:
         lines += [""] + _comparison_lines(summary, baseline_rows, config.k)
     reproduce = f"python -m eval.run --tasks {config.tasks} --k {config.k}"

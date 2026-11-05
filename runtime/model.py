@@ -1,8 +1,14 @@
 """模型层：Backend 抽象 + 确定性脚本后端 + OpenAI 兼容后端。
 
-Backend.generate() 只负责返回模型原始文本；JSON 解析与重试属于运行时护栏，
-由 runtime/loop.py 负责，不放在这里。
+Backend.generate() 返回 ModelReply（模型文本 + token 用量 + 调用耗时）。
+用量与耗时是「一次模型调用」的观测，只能在模型层产生；loop.py 仍保持
+同步纯逻辑，不读时钟、不写文件、不调网络，只把观测值塞进 span。
 
+ScriptedBackend 不产生真实观测，三个数值恒为 0，这是「逐字节一致」的前提；
+OpenAIBackend 下这些是真实值，只进 trace / 结果行，不参与判分，
+也不承诺逐字节可复现（报告口径会如实标注）。
+
+JSON 解析与重试属于运行时护栏，由 runtime/loop.py 负责，不放在这里。
 OpenAIBackend 用标准库 urllib 直接调用 OpenAI 兼容的 HTTP 接口，
 因此连可选后端都不需要第三方 SDK，全程零依赖。
 """
@@ -10,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Protocol, Sequence
@@ -22,8 +29,26 @@ SYSTEM_PROMPT = (
 )
 
 
+@dataclass(frozen=True)
+class ModelReply:
+    """一次模型调用的完整产出。
+
+    tokens 取 prompt + completion，与服务商 usage 口径一致。
+    latency_ms 取整毫秒，避免浮点进入产物（真实模型路径也不留浮点）。
+    """
+
+    text: str
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    latency_ms: int = 0
+
+    @property
+    def tokens(self) -> int:
+        return self.prompt_tokens + self.completion_tokens
+
+
 class Backend(Protocol):
-    def generate(self, messages: list[dict[str, str]]) -> str: ...
+    def generate(self, messages: list[dict[str, str]]) -> ModelReply: ...
 
 
 @dataclass(frozen=True)
@@ -51,14 +76,14 @@ class ScriptedBackend:
         ]
         self._cursor = 0
 
-    def generate(self, messages: list[dict[str, str]]) -> str:
+    def generate(self, messages: list[dict[str, str]]) -> ModelReply:
         if not self._script:
-            return ""
+            return ModelReply(text="")
         if self._cursor >= len(self._script):
-            return self._script[-1]
+            return ModelReply(text=self._script[-1])
         text = self._script[self._cursor]
         self._cursor += 1
-        return text
+        return ModelReply(text=text)
 
 
 class OpenAIBackend:
@@ -77,7 +102,7 @@ class OpenAIBackend:
         self._model = model
         self._opener = opener if opener is not None else urllib.request.urlopen
 
-    def generate(self, messages: list[dict[str, str]]) -> str:
+    def generate(self, messages: list[dict[str, str]]) -> ModelReply:
         payload = {
             "model": self._model,
             "messages": [{"role": "system", "content": SYSTEM_PROMPT}, *messages],
@@ -92,9 +117,17 @@ class OpenAIBackend:
             },
             method="POST",
         )
+        started = time.perf_counter()
         with self._opener(request) as response:
             body = json.loads(response.read().decode("utf-8"))
-        return body["choices"][0]["message"]["content"]
+        latency_ms = int(round((time.perf_counter() - started) * 1000))
+        usage = body.get("usage") or {}
+        return ModelReply(
+            text=body["choices"][0]["message"]["content"],
+            prompt_tokens=int(usage.get("prompt_tokens") or 0),
+            completion_tokens=int(usage.get("completion_tokens") or 0),
+            latency_ms=latency_ms,
+        )
 
 
 def build_backend(config: BackendConfig, script: Sequence[str]) -> Backend:

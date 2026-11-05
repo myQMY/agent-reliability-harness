@@ -134,9 +134,9 @@ class TestBackends(unittest.TestCase):
         backend = ScriptedBackend(
             [{"tool": "get_order", "args": {"order_id": "O-100"}}]
         )
-        first = backend.generate([])
-        self.assertEqual(backend.generate([]), first)
-        self.assertEqual(backend.generate([]), first)
+        first = backend.generate([]).text
+        self.assertEqual(backend.generate([]).text, first)
+        self.assertEqual(backend.generate([]).text, first)
 
     def test_build_backend_switches(self):
         self.assertIsInstance(build_backend(BackendConfig(), []), ScriptedBackend)
@@ -162,8 +162,11 @@ class TestBackends(unittest.TestCase):
             return io.BytesIO(json.dumps(payload).encode("utf-8"))
 
         backend = OpenAIBackend("http://x/v1", "k", "m", opener=opener)
-        self.assertEqual(
-            backend.generate([{"role": "user", "content": "hi"}]),
-            '{"final":"ok"}',
-        )
+        reply = backend.generate([{"role": "user", "content": "hi"}])
+        self.assertEqual(reply.text, '{"final":"ok"}')
+        # 响应未带 usage 时降级为零值，不编造成本数据
+        self.assertEqual((reply.prompt_tokens, reply.completion_tokens), (0, 0))
+        self.assertEqual(reply.tokens, 0)
+        self.assertIsInstance(reply.latency_ms, int)
+        self.assertGreaterEqual(reply.latency_ms, 0)
         self.assertEqual(captured[0].full_url, "http://x/v1/chat/completions")

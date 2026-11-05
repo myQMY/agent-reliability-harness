@@ -2,7 +2,7 @@
 
 面向多轮工具调用 Agent 的可靠性评测与运行时平台。
 
-> 状态：MVP 已跑通（W1 全部 + W2 判分 / trace），P0 实验记录体系已落地。本文件不写任何未经验证的结论；所有指标以 `experiments/` 下可复现的结果为准。
+> 状态：W1 全部、W2 全量（判分 / trace / 真实模型观测 / 条件话术 / trace 归因）与 P0 实验记录体系已落地。本文件不写任何未经验证的结论；所有指标以 `experiments/` 下可复现的结果为准。
 
 ## 为什么做这个
 
@@ -38,8 +38,8 @@ MVP 的功能范围、设计原则与非目标见 [docs/mvp-design.md](docs/mvp-
 - **判分**：对话结束后，将最终数据库状态与目标状态逐字段比对，并检查策略遵循与必要信息告知；全部满足才计 1，否则 0。
 - **pass¹**：每个任务首次执行的平均通过率。
 - **pass^k**：同一任务连续 k 次独立执行全部通过的概率，用来暴露「偶尔成功」。
-- **失败归因**：意图误解 / 工具选错 / 参数错误 / 策略违规 / 循环或超时 / 输出格式失败。
-- **同时观测**：单任务 token 成本、平均步数、p95 延迟、无效工具调用率。
+- **失败归因**：沿 trace 按 step 顺序取**首个可判定偏离点**作主归因（意图误解 / 工具选错 / 参数错误 / 策略违规 / 循环或超时 / 输出格式失败；判不出如实记 `unknown`）；并列原因与偏离点位置写进结果行的 `reasons` / `first_divergence`。
+- **同时观测**：单任务 token 成本、平均步数、p95 延迟、无效工具调用率。`ScriptedBackend` 下 token / 延迟恒为 0（不是成本数据）；`OpenAIBackend` 从响应的 `usage` 与墙钟耗时取真实值，**不参与判分**。
 
 ## 快速开始
 
@@ -52,28 +52,30 @@ python -m eval.run --tasks tasks/mvp_10.jsonl --k 3
 
 一条命令跑完 10 条任务 × 3 次 = 30 个 trial，产出：
 
-- `results/result_rows.jsonl`：结果行（不入库）
-- `traces/<trial_id>.jsonl`：每步一个 span 的全链路 trace（不入库）
+- `results/result_rows.jsonl`：结果行，含 `reasons` / `first_divergence` 归因证据（不入库）
+- `traces/<trial_id>.jsonl`：每步一个 span 的全链路 trace，assistant span 携带模型观测（不入库）
 - `experiments/runs/<run_id>/report.md` + `config.json`：本次实验的报告与生效配置快照（入库）
 
 **实验配置以 `experiments/config.toml` 为唯一事实来源**：后端、k、任务集、两条护栏参数、对照基线都在这里；CLI 显式参数只覆盖对应字段。最终生效配置经确定性摘要生成 `run_id`，同配置必得同一 `run_id`，改任一字段就落到新的实验目录，因此做单变量对照实验时每组的输入都可追溯。
 
 `experiments/mvp_baseline.md` 与 `experiments/baseline/result_rows.jsonl` 是 **W1 冻结基线**，只读参照，任何运行都不会覆盖；每次报告自动带「与冻结基线对照」表。显式 `--report` 视为临时报告，且指向冻结基线时会被直接拒绝。
 
-默认使用 `ScriptedBackend`（确定性脚本、零成本、零密钥）。切真实模型时复制 `.env.example` 为 `.env` 填入 `LLM_*`，再执行 `python -m eval.run --backend openai --k 3`；该路径走标准库 `urllib`，同样无需安装 SDK。注意当前 `OpenAIBackend` 尚未接入 usage 观测，`tokens` / `latency_ms` 仍为 0（W2 待办），报告口径会如实标注。
+默认使用 `ScriptedBackend`（确定性脚本、零成本、零密钥），token / 延迟恒为 0。切真实模型时复制 `.env.example` 为 `.env` 填入 `LLM_*`，再执行 `python -m eval.run --backend openai --k 3`；该路径走标准库 `urllib`，同样无需安装 SDK，并从响应的 `usage` 读取 prompt / completion token、用墙钟耗时记录 `latency_ms`。真实观测只进 trace 与结果行，不参与判分；报告会如实标注该路径不保证逐字节可复现。
+
+多轮任务可带可选的 `utterance_rules` 条件话术：Agent 上一轮反问时按规则换一句更合适的话，仍是确定性字符串匹配、不调模型。默认任务集的规则在脚本后端下不命中，因此冻结基线保持不变；字段说明见 [tasks/README.md](tasks/README.md)。
 
 任务格式与脚本说明见 [tasks/README.md](tasks/README.md)，实现口径见 [docs/tech-stack.md](docs/tech-stack.md)。
 
 ## 开发路线
 
-> W1 全部、W2 的判分 / trace、P0 实验记录体系已落地；冻结基线见 [experiments/mvp_baseline.md](experiments/mvp_baseline.md)。
+> W1 全部、W2 全量、P0 实验记录体系已落地；冻结基线见 [experiments/mvp_baseline.md](experiments/mvp_baseline.md)。
 
 | 阶段 | 交付 |
 | --- | --- |
 | W1 | 领域库 + 最小 Agent + 10 条任务，拿到基线（已交付） |
 | W2 | trace + 终态判分 + 批量执行，出失败归因分布（已交付） |
 | P0 | 实验配置版本化、`run_id` 留档、冻结基线与报告 diff（已交付） |
-| W2 余项 | 接真实模型、usage 观测、模拟器条件话术、归因从 trace 判定 |
+| W2 余项 | `ModelReply` 真实观测、条件话术、trace 首个偏离点归因与证据入库（已交付） |
 | W3 | 按归因逐项修运行时：校验、预算、压缩、幂等（每组只改一个变量） |
 | W4 | 4–6 组单变量对照实验，出成功率 / 成本帕累托图 |
 | W5 | 服务化、并发、容器化、trace 回放、测试 |

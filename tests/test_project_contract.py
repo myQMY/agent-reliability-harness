@@ -226,5 +226,42 @@ class TestExperimentRecords(unittest.TestCase):
                 self.assertIn(compact(phrase), text, f"技术方案缺少 {phrase}")
 
 
+class TestW2MeasurementContract(unittest.TestCase):
+    """W2 升级的是测量能力而非测量结果：守住观测来源、归因与话术的契约。"""
+
+    def test_model_reply_is_the_only_observation_source(self):
+        source = read("runtime/model.py")
+        for phrase in ("ModelReply", "prompt_tokens", "completion_tokens", "usage"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, source)
+        self.assertNotIn(
+            "SCRIPTED_TOKENS",
+            read("runtime/guard.py"),
+            "护栏层不得再提供假的成本常量",
+        )
+
+    def test_attribution_reads_trace_not_just_errors(self):
+        source = read("eval/grader.py")
+        for phrase in ("trace_events", "first_divergence", "unknown", "errors_fallback"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, source)
+
+    def test_conditional_utterances_are_validated(self):
+        source = read("eval/user_sim.py")
+        for phrase in ("TurnContext", "utterance_for", "parse_rules"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, source)
+
+    def test_docs_describe_w2_honestly(self):
+        readme = compact(read("README.md"))
+        stack = compact(read("docs/tech-stack.md"))
+        for phrase in ("first_divergence", "usage", "unknown"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(compact(phrase), readme, f"README 缺少 {phrase}")
+        for phrase in ("ModelReply", "首个可判定偏离点", "usage"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(compact(phrase), stack, f"技术方案缺少 {phrase}")
+
+
 if __name__ == "__main__":
     unittest.main()

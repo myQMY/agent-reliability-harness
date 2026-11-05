@@ -186,5 +186,6 @@ class TestGrade(unittest.TestCase):
                 "policy_violation",
                 "loop_or_timeout",
                 "output_format",
+                "unknown",
             },
         )

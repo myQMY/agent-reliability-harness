@@ -83,6 +83,8 @@ class TestByteIdentical(unittest.TestCase):
                 "trial",
                 "passed",
                 "failure_type",
+                "reasons",
+                "first_divergence",
                 "steps",
                 "tokens",
                 "latency_ms",

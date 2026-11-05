@@ -13,7 +13,7 @@ from typing import Any
 
 from env import db
 from eval import grader, trace
-from eval.user_sim import RuleUserSimulator
+from eval.user_sim import RuleUserSimulator, TurnContext
 from runtime import guard, loop
 from runtime.model import BackendConfig, build_backend
 
@@ -52,15 +52,19 @@ def _run_trial(
     backend = build_backend(config.backend, task.get("script", ()))
     counter = loop.StepCounter()
     budget = guard.StepBudget(max_steps=config.max_steps)
-    simulator = RuleUserSimulator(task["user_utterances"])
+    simulator = RuleUserSimulator(
+        task["user_utterances"], task.get("utterance_rules", ())
+    )
 
     messages: list[dict[str, str]] = []
     spans: list[dict[str, Any]] = []
     final_texts: list[str] = []
     errors: list[str] = []
     termination = ""
+    context = TurnContext()
 
-    for utterance in simulator.turns():
+    for turn in range(1, simulator.turn_count + 1):
+        utterance = simulator.utterance_for(turn, context)
         messages.append({"role": "user", "content": utterance})
         spans.append(
             loop.make_span(
@@ -80,6 +84,15 @@ def _run_trial(
         errors.extend(result.errors)
         final_texts.append(result.final_text)
         termination = result.termination
+        context = TurnContext(
+            last_final=result.final_text,
+            last_termination=result.termination,
+            last_tools=tuple(
+                span["tool"]
+                for span in result.spans
+                if span["role"] == "tool" and span["tool"]
+            ),
+        )
         if result.termination != loop.TERMINATION_FINAL:
             break
 
@@ -91,6 +104,7 @@ def _run_trial(
             "termination": termination,
             "errors": errors,
             "final_text": "\n".join(text for text in final_texts if text),
+            "spans": spans,
         },
     )
     row: Row = {
@@ -99,6 +113,8 @@ def _run_trial(
         "trial": trial,
         "passed": verdict["passed"],
         "failure_type": verdict["failure_type"],
+        "reasons": verdict["reasons"],
+        "first_divergence": verdict["first_divergence"],
         "steps": budget.used,
         "tokens": sum(span["tokens"] for span in spans),
         "latency_ms": sum(span["latency_ms"] for span in spans),

@@ -1,6 +1,8 @@
 """最小 Agent 运行时：while 循环 + 结构化工具调用。
 
 loop 保持同步纯逻辑：不写文件、不读时钟、不调网络。
+token / 延迟观测由 Backend.generate 的 ModelReply 带进来，只挂在
+assistant span 上；loop 自己不测量任何东西。
 每个事件产出一条内存 span，由 eval 层统一序列化并落盘，
 这样 W5 做并发时循环与判分逻辑都不用改。
 """
@@ -48,8 +50,15 @@ def make_span(
     tool: str | None = None,
     args: Any = None,
     observation: Any = None,
+    *,
+    tokens: int = 0,
+    latency_ms: int = 0,
 ) -> dict[str, Any]:
-    """设计文档 §6 的 8 个字段一律补齐；确定性序列化由 eval/trace.py 负责。"""
+    """设计文档 §6 的 8 个字段一律补齐；确定性序列化由 eval/trace.py 负责。
+
+    只有 assistant span 携带模型观测；其余 span 用默认 0，
+    这样结果行的 sum(tokens) 恰好等于本次 trial 的模型总用量。
+    """
     return {
         "trial_id": trial_id,
         "step": step,
@@ -57,8 +66,8 @@ def make_span(
         "tool": tool,
         "args": args,
         "observation": observation,
-        "tokens": guard.SCRIPTED_TOKENS,
-        "latency_ms": guard.SCRIPTED_LATENCY_MS,
+        "tokens": tokens,
+        "latency_ms": latency_ms,
     }
 
 
@@ -103,10 +112,18 @@ def run_turn(
             result.termination = TERMINATION_MAX_STEPS
             return result
 
-        raw = backend.generate(messages)
+        reply = backend.generate(messages)
+        raw = reply.text
         messages.append({"role": "assistant", "content": raw})
         result.spans.append(
-            make_span(trial_id, counter.next(), "assistant", observation=raw)
+            make_span(
+                trial_id,
+                counter.next(),
+                "assistant",
+                observation=raw,
+                tokens=reply.tokens,
+                latency_ms=reply.latency_ms,
+            )
         )
 
         action, reason = parse_action(raw)

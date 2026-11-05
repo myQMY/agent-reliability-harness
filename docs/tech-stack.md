@@ -1,6 +1,6 @@
 # 技术实现方案：Agent 可靠性评测与运行时平台
 
-> 状态：选型已确认，MVP 已实现（W1 全部 + W2 判分 / trace），P0 实验记录体系已落地。本文只定技术实现口径，不修改 [MVP 产品设计](mvp-design.md) 已确认的功能范围与验收标准；不写任何未经验证的结果数字。
+> 状态：选型已确认，W1 全部、W2 全量（判分 / trace / 真实模型观测 / 条件话术 / trace 归因）与 P0 实验记录体系已落地。本文只定技术实现口径，不修改 [MVP 产品设计](mvp-design.md) 已确认的功能范围与验收标准；不写任何未经验证的结果数字。
 > 适用阶段：W1–W2（MVP），并给出 W3–W5 的依赖升级点。整体定位见 [README.md](../README.md)，协作规则见 [AGENTS.md](../AGENTS.md)。
 
 ## 1. 总体结论
@@ -45,16 +45,16 @@ Python 3.11+ 标准库为主，`sqlite3` 作领域库，JSONL 作任务 / trace 
 
 ### 4.2 Agent 运行时 `runtime/`
 
-- `Backend` 用 `typing.Protocol` 定义，`ScriptedBackend`（默认，按任务预置脚本返回、无网络无随机）与 `OpenAIBackend`（可选）各自实现，切换只改配置不改 `loop.py`。
-- `loop.py` 手写 `while` 循环 + 结构化工具调用；护栏严格按 F4 只保留 `MAX_STEPS` 与 JSON 解析失败重试 2 次，**不提前补齐护栏**（留出难看的基线是 W3 的自变量）。
-- **IO 收敛原则**：模型调用与领域库写入只出现在 `Backend` 与 `env` 两层；`loop.py`、`grader.py` 保持同步纯逻辑，trace span 以内存对象返回、由 `eval/trace.py` 统一落盘。这样 W5 做并发时只需改 `runner.py` 与后端实现，循环与判分逻辑不动。
+- `Backend` 用 `typing.Protocol` 定义，`ScriptedBackend`（默认，按任务预置脚本返回、无网络无随机）与 `OpenAIBackend`（可选）各自实现，切换只改配置不改 `loop.py`。`generate()` 返回 `ModelReply(text, prompt_tokens, completion_tokens, latency_ms)`：观测是「一次模型调用」的属性，只能在模型层产生；脚本后端四个数值恒为 0，OpenAI 后端取响应 `usage` 与墙钟耗时。
+- `loop.py` 手写 `while` 循环 + 结构化工具调用；护栏严格按 F4 只保留 `MAX_STEPS` 与 JSON 解析失败重试 2 次，**不提前补齐护栏**（留出难看的基线是 W3 的自变量）。`make_span` 把 `ModelReply` 的观测挂到 assistant span，其余 span 保持 0，span 字段仍是设计文档 §6 的 8 个。
+- **IO 收敛原则**：模型调用、计时与领域库写入只出现在 `Backend` 与 `env` 两层；`loop.py`、`grader.py` 保持同步纯逻辑、不读时钟，trace span 以内存对象返回、由 `eval/trace.py` 统一落盘。这样 W5 做并发时只需改 `runner.py` 与后端实现，循环与判分逻辑不动。
 - MVP 不上 `asyncio`，不上任何 Agent 框架。
 
 ### 4.3 评测 Harness `eval/`
 
 - 任务集读 JSONL、实验配置读 TOML；记录类型用 `dataclass` / `TypedDict`，**不用 pydantic**（理由见 §6）。
-- `grader.py` 是纯函数：输入终态快照、策略检查项、必须告知项，输出 0/1 与 `failure_type`；不写文件、不调模型、不读时钟。
-- `runner.py` 串行跑 N × k，每个 trial 独立环境；`user_sim.py` 规则版逐轮发话。
+- `grader.py` 是纯函数：输入终态快照、策略检查项、必须告知项与 trace span 流，输出 0/1、`failure_type`、`reasons`、`first_divergence`；不写文件、不调模型、不读时钟。归因沿 trace 按 step 取**首个可判定偏离点**，判不出记 `unknown`；`failure_type` 保持单标签主归因，并列原因放 `reasons`，避免复合标签把分布表撑爆。
+- `runner.py` 串行跑 N × k，每个 trial 独立环境；`user_sim.py` 规则版逐轮发话，可选的 `utterance_rules` 按上一轮 final / 工具 / 终止原因选话术，仍是确定性字符串匹配、不调模型。默认任务集的规则在脚本后端下不命中，标尺不变。
 - `run.py` 用 `argparse`，命令形态与设计文档 §8 的验收命令保持一致。
 
 ### 4.4 可观测与报告
@@ -70,8 +70,8 @@ Python 3.11+ 标准库为主，`sqlite3` 作领域库，JSONL 作任务 / trace 
 - **禁止进入产物对比范围的非确定值**：wall-clock 时间戳、随机 UUID、真实浮点耗时、无序容器的序列化结果。
 - `trial_id` 确定性生成，形如 `task_id + trial index`（可选附配置摘要），不得用随机数或时间。
 - **统一序列化出口**：所有 JSONL / 结果文件走同一个函数，`json.dumps(..., ensure_ascii=False, sort_keys=True, separators=(",", ":"))`；结果行按 `(task_id, trial)` 稳定排序后写出。
-- `latency_ms` / `tokens` 在 `ScriptedBackend` 下必须确定化：统一记为固定常量，**或**明确排除在一致性断言之外。实现时二选一并写进测试说明，不得写入真实计时。
-- `failure_type` 用固定枚举字符串，不做自由文本，保证归因分布可复算。
+- `latency_ms` / `tokens` 由 `ModelReply` 提供：`ScriptedBackend` 恒为 0（逐字节一致的前提）；`OpenAIBackend` 是 `usage` + 墙钟耗时取整的真实观测，**明确排除在一致性断言之外，且不参与判分**。计时只在模型层，`loop.py` / `grader.py` 不读时钟。
+- `failure_type` 用固定枚举字符串（含 `unknown` 兜底），不做自由文本、不做复合标签，保证归因分布可复算；并列原因与偏离点证据另放 `reasons` / `first_divergence`。
 - 实验配置与结果表同目录版本化入库，保证每个数字都能在仓库里翻到出处。
 - 一致性测试断言同配置连跑两次，`traces/` 与 `results/` 产物逐字节相同。
 
@@ -83,7 +83,7 @@ W3 的单变量对照实验要求「每组的输入都能翻到出处」，因�
 - `run_id = <name>-<sha256(配置摘要)[:12]>`，摘要走 `sort_keys` 稳定序列化；不含时间戳、随机值、机器路径与输出目录。改任一字段必得新 `run_id`，同配置必得同一 `run_id`。
 - **冻结基线**：`experiments/mvp_baseline.md` 与 `experiments/baseline/result_rows.jsonl` 只读；`--report` 不再以基线文件为默认值，且指向冻结基线时直接拒绝，防止重跑一次就丢掉对照组。
 - 留档模式写 `experiments/runs/<run_id>/report.md` 与 `config.json`；报告内容只依赖结果行、配置与基线行，不含输出路径与时钟，因此同 `run_id` 的报告逐字节一致，并自带「与冻结基线对照」表。
-- 报告口径随 `backend` 分支。`OpenAIBackend` 当前尚未接入 usage 观测，`tokens` / `latency_ms` 仍为 0，报告如实标注为 W2 待办，不拿占位数字充当成本结论。
+- 报告口径随 `backend` 分支：脚本后端明确写出 token / 延迟是零值而非成本数据；真实模型后端写明观测来源是 `usage` 与墙钟耗时、不参与判分且不保证可复现。两边都不拿占位数字充当成本结论。报告另按任务列出「归因证据（首个偏离点）」，完整证据在结果行里。
 - 「逐字节一致」的验收范围明确为 **ScriptedBackend**；真实模型路径不承诺结果可复现，只保证配置可追溯。
 
 ## 6. 依赖策略：按阶段引入，而非按需引入
@@ -115,13 +115,14 @@ W4 若做框架对照，应作为**独立 backend / loop 实现**并列接入，
 - 统一 `unittest`（仅标准库），命令：`python -m unittest discover -s tests -v`。
 - 已有守门测试继续守住协作约定、仓库骨架、`.gitignore`、设计文档锚点；本次新增技术方案锚点守门，防止关键选型被悄悄改掉。
 - 实现阶段需补的用例：环境重置隔离、grader 正例 / 反例、`MAX_STEPS` 触发、trace 完整性、runner 重复次数、**逐字节一致性**、序列化排序稳定、Backend 可切换。以上用例均已落地于 `tests/test_env.py`、`test_grader.py`、`test_loop.py`、`test_runner.py`、`test_reproducibility.py`。
+- W2 余项另补 `tests/test_observability.py`、`test_user_sim.py`、`test_attribution.py`：usage 传播与缺失降级、观测不进判分、条件话术命中与规则校验、首个偏离点、`unknown` 兜底、以及「口径升级后默认分布与冻结基线逐项一致」。
 - 每次改动按 `AGENTS.md`：改动 → 补 / 更新测试 → 全部验证通过 → 一个对应 commit → 交付。
 
 ## 9. 演进路线（核心层不动）
 
 | 阶段 | 技术变化 | 不变的部分 |
 | --- | --- | --- |
-| W2 | `OpenAIBackend` 已落地（离线单测覆盖），待接真实模型验证 | `Backend` 接口、grader、trace 格式 |
+| W2 | `ModelReply` 真实观测、条件话术、trace 首个偏离点归因与证据入库（已落地，离线单测覆盖）；真实模型服务待选型验证 | 判分口径、trace 的 8 字段、冻结基线的 pass 数字与失败分布 |
 | P0 | 实验配置版本化、`run_id` 留档、冻结基线与报告 diff（已交付） | `Backend` 接口、判分口径、trace 格式 |
 | W3 | 逐项加护栏：参数校验、幂等键、上下文压缩、预算；一次只改一个变量 | 判分与执行主链路 |
 | W4 | 多组单变量对照实验、结果表与帕累托图 | 任务集与判分口径 |
@@ -135,6 +136,7 @@ Web 层选型到 W5 再定；届时的回放页是只读 JSONL 的展示层，�
 - **范围泄漏已清理**：`.env.example` 中 `EVAL_CONCURRENCY` / `MAX_TOKENS_PER_TASK` / `EVAL_DB_TEMPLATE` 已改为注释并标注 W3 / W5 生效；守门测试增加用例，防止这三个参数以生效配置形式回到 MVP。
 - **实验记录体系已落地（P0）**：配置版本化、`run_id` 留档、冻结基线保护、报告 diff 与随后端切换的口径说明均已实现，并由 `tests/test_experiment_config.py` 与守门测试覆盖。W3 起每组实验改一个配置字段即可，不需要再靠命令行人肉记忆。
 - **模型服务未定**：`OpenAIBackend` 目前按 OpenAI 兼容 `chat/completions` 实现，已用可注入 opener 做离线单测；若目标服务协议不同，需在 `runtime/model.py` 内加一层适配，`loop.py` 与 grader 不受影响。
-- **真实观测未接入**：`OpenAIBackend` 丢弃了响应的 `usage`，且 span 的 `tokens` / `latency_ms` 由 `guard` 常量写死，因此 W2 需把 `Backend.generate` 改为返回结构化结果（文本 + token + 耗时）；真实耗时只进 span 不进判分，且明确排除出「逐字节一致」的断言范围。
+- **真实观测已接入（W2 余项）**：`Backend.generate` 返回 `ModelReply`，`OpenAIBackend` 读 `usage` 并计时；观测只挂 assistant span、只汇总进结果行，不参与判分。脚本后端恒为零值，逐字节一致仍成立；真实模型路径明确排除出该验收项。
+- **归因与话术已接入（W2 余项）**：`grader` 从 trace 首个偏离点判定，把 `reasons` / `first_divergence` 写进结果行；`user_sim` 支持可选 `utterance_rules`。两项升级都保证默认跑批的 pass 数字与 6 类失败分布和冻结基线逐项一致，由 `tests/test_attribution.py` 守门——**测量能力升级不得偷偷改变测量结果**。
 - **零第三方依赖**本次按硬约束执行；若后续决定放宽，需同步修改守门测试与设计原则，而不是静默引入。
 - 本文不调整产品范围；范围变更走 `docs/mvp-design.md` 并同步守门测试。

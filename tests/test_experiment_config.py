@@ -176,12 +176,15 @@ class TestReport(unittest.TestCase):
     def test_scripted_caveats(self):
         text = self._render("scripted", None)
         self.assertIn("必然相等", text)
+        self.assertIn("不是成本数据", text)
         self.assertNotIn("不保证逐字节可复现", text)
 
     def test_openai_caveats_are_honest(self):
         text = self._render("openai", None)
         self.assertIn("不保证逐字节可复现", text)
-        self.assertIn("尚未接入 usage 观测", text)
+        self.assertIn("来自响应的 `usage`", text)
+        self.assertIn("不参与判分", text)
+        self.assertNotIn("尚未接入 usage 观测", text)
         self.assertIn("--backend openai", text)
         self.assertNotIn("必然相等", text)
 

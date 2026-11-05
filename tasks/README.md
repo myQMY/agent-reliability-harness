@@ -14,6 +14,20 @@
 | `policy_checks` | 本任务适用的策略检查器，枚举见 [`env/policy.md`](../env/policy.md) |
 | `required_disclosures` | 最终回复文本必须包含的全部子串 |
 | `script` | **ScriptedBackend 的确定性行为脚本**，见下 |
+| `utterance_rules` | 可选的条件话术规则，见下 |
+
+## 关于 utterance_rules：可选的条件话术
+
+`utterance_rules` 用于「Agent 上一轮反问时换一句更合适的话」。每项形如：
+
+```
+{"turn": 2, "text": "订单 O-102，退 3000 分，请继续。", "when": {"final_contains_any": ["哪", "请问"]}}
+```
+
+- `turn` 是 1-based 轮次，必须 ≥ 2（第 1 轮没有上文）；命中首条规则就用 `text` 替换该轮预置话术，否则沿用 `user_utterances`。
+- `when` 可含 `final_contains_any`（上一轮 final 文本命中任一子串）、`tool_called`（上一轮调用过某工具）、`termination`（上一轮终止原因）；多个条件需同时满足，至少要有一个条件。
+- 规则是**确定性字符串匹配**，不调模型。未知字段、空条件、非法轮次会在解析时直接报错，避免「写了但没生效」。
+- MVP 的 T10 带一条规则，但 ScriptedBackend 第一轮回复的是订单状态、不含反问词，因此默认跑批仍走原话术「那帮我退 3000 分吧。」，**W1 冻结基线不受影响**。接真实模型反问或 W4 扩任务集时，这条能力才产生区分度。
 
 ## 关于 script：它不是答案
 
@@ -49,4 +63,6 @@ python -m eval.run --tasks tasks/mvp_10.jsonl --k 3
 ```
 
 产物：`results/result_rows.jsonl`（结果行）、`traces/<trial_id>.jsonl`（全链路 span）、
-`experiments/mvp_baseline.md`（结果表）。前两者不入库，结果表入库。
+`experiments/runs/<run_id>/report.md` 与同目录 `config.json`（报告与生效配置快照）。
+前两者不入库，留档报告入库。`experiments/mvp_baseline.md` 是 W1 冻结基线，只读，
+任何运行都不会覆盖；详见 [README.md](../README.md)。

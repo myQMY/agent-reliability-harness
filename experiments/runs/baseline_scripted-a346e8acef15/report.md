@@ -22,9 +22,10 @@
 
 - **pass¹**：每个任务首次执行的平均通过率。
 - **pass^k**：同一任务 k 次独立执行全部通过的任务占比。
-- ScriptedBackend 是确定性脚本，同一任务 k 次结果完全一致，因此本次 **pass^k 与 pass¹ 必然相等**；pass^k 暴露「偶尔成功」的能力要等 W2 接入真实模型后才显现。这一相等不是缺陷，是测量链路确定性的证据。
+- ScriptedBackend 是确定性脚本，同一任务 k 次结果完全一致，因此本次 **pass^k 与 pass¹ 必然相等**；pass^k 暴露「偶尔成功」的能力要等接入真实模型后才显现。这一相等不是缺陷，是测量链路确定性的证据。
+- `tokens` / `latency_ms` 恒为 0：脚本后端不产生真实模型调用，这是保持产物确定性的零值，**不是成本数据**，不能据此下成本或延迟结论。
 - 无效工具调用率 = 工具层报错次数 / 总步数，来自 trace 的事件计数。
-- `tokens` / `latency_ms` 当前在所有后端下都是 0：ScriptedBackend 使用占位常量，OpenAIBackend 尚未接入 usage 观测（W2 待办），因此成本与延迟结论暂不成立。
+- 失败归因取 trace 中**首个**可判定偏离点作主归因；并列原因与偏离点证据写入结果行的 `reasons` / `first_divergence`，判不出时如实记为 `unknown`。
 
 ## 总体指标
 
@@ -47,6 +48,7 @@
 | policy_violation | 9 |
 | loop_or_timeout | 3 |
 | output_format | 3 |
+| unknown | 0 |
 
 ## 逐任务结果
 
@@ -62,6 +64,21 @@
 | T08 | 我要退 O-100，退 2500 分。 | `000` | 否 | bad_args | 2.00 |
 | T09 | 我要退 O-100，退 2500 分。 | `000` | 否 | loop_or_timeout | 12.00 |
 | T10 | 帮我查一下 O-102 的状态。 | `000` | 否 | intent_misread | 5.00 |
+
+## 归因证据（首个偏离点）
+
+> 主归因取 trace 中按 step 顺序的第一个可判定偏离点；这里每个任务只列首个失败 trial，全部 trial 的证据见结果行的 `reasons` / `first_divergence`。
+
+| task_id | trial_id | 主归因 | 偏离点 | 并列原因 |
+| --- | --- | --- | --- | --- |
+| T02 | `T02-t1` | policy_violation | step 5 / state_write / refund_order | attribution:policy_violation, evidence:trace, missing_disclosures:2500, policy:no_over_refund, terminal_state_mismatch |
+| T03 | `T03-t1` | policy_violation | step 3 / state_write / refund_order | attribution:policy_violation, evidence:trace, policy:no_over_refund,single_refund_per_order, terminal_state_mismatch |
+| T04 | `T04-t1` | policy_violation | step 3 / state_write / cancel_order | attribution:policy_violation, evidence:trace, missing_disclosures:无法退款, policy:no_refund_after_cancel, terminal_state_mismatch |
+| T06 | `T06-t1` | output_format | step 7 / output_format / json_retry | attribution:output_format, evidence:trace, missing_disclosures:O-100,2500, terminal_state_mismatch, termination:json_failure |
+| T07 | `T07-t1` | wrong_tool | step 3 / wrong_tool / refund_money | attribution:wrong_tool, evidence:trace, missing_disclosures:O-100,2500, terminal_state_mismatch |
+| T08 | `T08-t1` | bad_args | step 3 / bad_args / refund_order | attribution:bad_args, evidence:trace, missing_disclosures:O-100,2500, terminal_state_mismatch |
+| T09 | `T09-t1` | loop_or_timeout | step 24 / assistant / - | attribution:loop_or_timeout, evidence:trace, missing_disclosures:O-100,2500, terminal_state_mismatch, termination:max_steps |
+| T10 | `T10-t1` | intent_misread | — | attribution:intent_misread, evidence:none, missing_disclosures:3000 |
 
 ## 与冻结基线对照
 
@@ -79,6 +96,7 @@
 | policy_violation | 9 | 9 | +0 |
 | loop_or_timeout | 3 | 3 | +0 |
 | output_format | 3 | 3 | +0 |
+| unknown | 0 | 0 | +0 |
 
 ## 复现
 
