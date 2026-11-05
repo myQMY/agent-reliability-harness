@@ -16,12 +16,13 @@ compare = "experiments/baseline/result_rows.jsonl"
 max_steps = 12
 max_json_retries = 2
 # W3 起可在此写 enabled 数组开启运行时护栏：schema_validation / idempotency /
-# tool_retry（顺序即 loop.py 的判定顺序）。默认故意不写 = 全部关闭：
-# 开启任一护栏都会改变 run_id。
+# tool_retry / json_recovery（顺序即 loop.py 的判定顺序）。默认故意不写 = 全部关闭：
+# 开启任一护栏都会改变 run_id。四条护栏覆盖四类注入故障，组合已达可达上限，
+# 见 python -m eval.ceiling 生成的 experiments/w3_ceiling.md。
 # 对照实验必须用独立配置文件：experiments/guard_ab_*.toml 是四份 2×2 全因子
-# 配置加一份 tool_retry 单变量 A/B；python -m eval.guard_matrix 只读留档汇总成
-# experiments/w3_guard_matrix.md，python -m eval.ab_sweep 用同一 30-seed 集给出
-# 新护栏的效应符号分布（只报单 seed 的 A/B 不算可复现结论）。
+# 配置加 tool_retry / json_recovery 两份单变量 A/B；python -m eval.guard_matrix
+# 只读留档汇总成 experiments/w3_guard_matrix.md，python -m eval.ab_sweep 用同一
+# 30-seed 集给出新护栏的效应符号分布（只报单 seed 的 A/B 不算可复现结论）。
 
 # [seeded] 段只有 backend = "seeded" 时才生效，因此故意不在默认配置里写它：
 # 加上任何字段都会改变 run_id，而本文件是 W1 冻结基线的等价配置。

@@ -2,24 +2,32 @@
 
 护栏的开关来自实验配置（eval/config.py），默认全部关闭：这是 W3 单变量
 对照实验的前提——OFF 组必须与 W1 冻结基线逐字节等价，任何护栏都不能
-悄悄改变默认行为。三条护栏共用同一个拦截预算与 ``GUARD_REJECT_PREFIX``
-协议，判定顺序在 loop.py 里固定为 schema_validation → idempotency（都在
-工具执行前）→ tool_retry（工具报错之后），保证结果确定、可归因。
+悄悄改变默认行为。四条护栏共用同一个拦截预算与 ``GUARD_REJECT_PREFIX``
+协议，判定位置在 loop.py 里固定，保证结果确定、可归因：
 
+- ``schema_validation`` / ``idempotency``：工具执行**之前**（顺序固定）。
+- ``tool_retry``：工具层报错**之后**。
+- ``json_recovery``：模型输出 JSON 解析失败**之后**、进入工具层之前。
+
+各条职责：
 - ``schema_validation``：只做参数 schema 校验，规则与工具层共用
   env/tools.validate_args；工具名合法性、业务策略都不归它管。
 - ``idempotency``：为写工具调用从 ``(tool, args)`` 确定性派生幂等键，
   在同一 trial 内对**已成功执行**的重复写拦截。键只在内存里、只在本次
   trial 有效，不承诺持久化幂等；未知工具 / 读工具 / 失败调用都不记账。
-- ``tool_retry``：工具层报错后触发重发。与前两条不同，它工作在**失败之后**：
-  如实保留报错的 tool span 与 ``errors``，只额外追加一条拒绝消息让后端
-  重发干净动作。这是路线表里「退避」在本同步确定性 harness 里的落地形态——
+- ``tool_retry``：工具层报错后触发重发。它工作在**失败之后**：如实保留
+  报错的 tool span 与 ``errors``，只额外追加一条拒绝消息让后端重发干净
+  动作。这是路线表里「退避」在本同步确定性 harness 里的落地形态——
   固定次数重试预算，不做真实 sleep、不引入指数延迟，否则会破坏逐字节复现。
+- ``json_recovery``：W1 的 JSON 重试只给出 ``RETRY_HINT`` 提示，被替换掉的
+  那个动作会被直接跳过；本护栏在**保留原提示证据**的基础上，额外追加一条
+  ``[GUARD-REJECT]`` 消息，让后端重发那一个动作。它覆盖 ``bad_json`` 注入
+  故障——四类注入故障里最后一条没有护栏覆盖的类别。脚本里固有的连续坏
+  JSON 没有可重发的干净动作，依然失败，护栏不越界。
 
-前两条护栏与工具层报错的区别都在**位置**：工具层报错会让这次调用的动作直接
-丢失，执行前护栏则拦下并把拒绝原因写进 messages，让后端有机会重发正确调用
-——这才是 harness 可测量的价值。``tool_retry`` 把同一个协议延伸到失败之后，
-覆盖 ``wrong_tool`` 这类执行前护栏明确放行的错误。
+前两条护栏与工具层报错的区别都在**位置**：工具层报错会让这次调用的动作
+直接丢失，执行前护栏则拦下并把拒绝原因写进 messages，让后端有机会重发
+正确调用——这才是 harness 可测量的价值。后两条把同一个协议延伸到失败之后。
 
 token / 延迟观测不在这里：它们由 Backend.generate 返回的 ModelReply 提供，
 ScriptedBackend / SeededBackend 恒为 0，OpenAIBackend 为真实值。
@@ -43,18 +51,29 @@ GUARD_REJECT_PREFIX = "[GUARD-REJECT]"
 GUARD_SCHEMA_VALIDATION = "schema_validation"
 GUARD_IDEMPOTENCY = "idempotency"
 GUARD_TOOL_RETRY = "tool_retry"
+GUARD_JSON_RECOVERY = "json_recovery"
 
 # 已实现的护栏白名单；配置里出现其他名字直接报错，杜绝「写了但没接上」。
-# 顺序同时是 loop.py 的判定顺序与报告里 --guard 的输出顺序，不要随意调整：
-# 前两条在 tools.call 之前、第三条在它返回错误之后。
-GUARD_NAMES = (GUARD_SCHEMA_VALIDATION, GUARD_IDEMPOTENCY, GUARD_TOOL_RETRY)
+# 顺序同时是报告里 --guard 的输出顺序，不要随意调整。四条护栏在 loop.py
+# 里的判定位置不同，互不争抢同一个分支。
+GUARD_NAMES = (
+    GUARD_SCHEMA_VALIDATION,
+    GUARD_IDEMPOTENCY,
+    GUARD_TOOL_RETRY,
+    GUARD_JSON_RECOVERY,
+)
 
 # 工具层可能返回的错误；这些错误都在 _validate 阶段被拦下、没有写入状态，
 # 因此重发干净动作是安全的。业务策略违规不在这里（工具层故意不检查策略）。
 RETRYABLE_TOOL_ERRORS = (tools.WRONG_TOOL, tools.BAD_ARGS)
 
-# 同一 turn 内最多拦截 / 重试次数（三条护栏共享）。脚本后端不响应拒绝消息，
-# 若没有这个上限，连续的坏参数动作会被反复拦下直到吃光 MAX_STEPS。
+# parse_action 的两类格式失败都可以尝试恢复：注入的 bad_json 属于
+# invalid_json；脚本固有的坏 JSON / 缺字段也会尝试，但没有干净动作可重发
+# 时会自然收敛（连续 3 次后 TERMINATION_JSON_FAILURE），护栏不越界。
+RECOVERABLE_FORMAT_REASONS = ("invalid_json", "missing_fields")
+
+# 同一 turn 内最多拦截 / 重试次数（四条护栏共享）。脚本后端不响应拒绝消息，
+# 若没有这个上限，连续的坏参数或坏 JSON 动作会被反复拦下直到吃光 MAX_STEPS。
 MAX_GUARD_REJECTIONS = 3
 
 # 幂等键长度：只用于同 trial 去重与 trace 追溯，取 16 位十六进制足够。
@@ -159,4 +178,18 @@ def tool_retry_message(name: str, error: str) -> str:
         f"{GUARD_REJECT_PREFIX} 工具 {name} 的调用在工具层失败（{error}），"
         "这次调用没有写入任何状态。请重新输出这一个完整的工具调用，"
         "工具名与参数都按任务要求写对。"
+    )
+
+
+def json_recovery_hint(reason: str) -> str:
+    """json_recovery 的拒绝文本：格式失败后要求后端重发被跳过的那一个动作。
+
+    与 ``tool_retry_message`` 一样以 ``GUARD_REJECT_PREFIX`` 开头，才能触发
+    SeededBackend 的 ``_pending_correct`` 重发。明确写「还没有执行」，是因为
+    W1 的 JSON 重试会把该动作直接跳过，而注入故障替换掉的其实是一个干净动作。
+    """
+    return (
+        f"{GUARD_REJECT_PREFIX} 上一次输出不是合法的单个 JSON 对象（{reason}），"
+        "被跳过的那一个动作还没有执行。请重新输出这一个完整的工具调用或 final，"
+        "不要跳过它。"
     )

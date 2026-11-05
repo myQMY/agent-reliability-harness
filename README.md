@@ -2,7 +2,7 @@
 
 面向多轮工具调用 Agent 的可靠性评测与运行时平台。
 
-> 状态：W1 全部、W2 全量（判分 / trace / 真实模型观测 / 条件话术 / trace 归因）、P0 实验记录体系、W2.5 测量链路校准，以及 W3 三条护栏（`schema_validation` / `idempotency` / `tool_retry`）的单变量 A/B、2×2 全因子与多种子稳健性检验已落地。本文件不写任何未经验证的结论；所有指标以 `experiments/` 下可复现的结果为准。
+> 状态：W1 全部、W2 全量（判分 / trace / 真实模型观测 / 条件话术 / trace 归因）、P0 实验记录体系、W2.5 测量链路校准，以及 W3 四条护栏（`schema_validation` / `idempotency` / `tool_retry` / `json_recovery`）的单变量 A/B、2×2 全因子、多种子稳健性检验与可达上限分析已落地。本文件不写任何未经验证的结论；所有指标以 `experiments/` 下可复现的结果为准。
 
 ## 为什么做这个
 
@@ -27,7 +27,7 @@ Agent demo 和能稳定运行的 Agent 之间，差的通常不是模型能力�
 | `eval/` | 用户模拟器、批量执行器、终态判分、归因分析、CLI |
 | `web/` | trace 回放与实验对照面板（W5） |
 | `docs/` | 产品设计与技术实现方案 |
-| `experiments/` | 版本化实验配置（`config.toml` / `calibration.toml` / `guard_ab_*.toml`）、冻结基线、按 `run_id` 留档的报告与结果行、`w3_guard_matrix.md` 因子汇总、`w3_robustness.md` 多种子稳健性检验、`w3_tool_retry_sweep.md` 第三条护栏的跨 seed A/B |
+| `experiments/` | 版本化实验配置（`config.toml` / `calibration.toml` / `guard_ab_*.toml`）、冻结基线、按 `run_id` 留档的报告与结果行、`w3_guard_matrix.md` 因子汇总、`w3_robustness.md` 多种子稳健性检验、`w3_tool_retry_sweep.md` / `w3_json_recovery_sweep.md` 跨 seed A/B、`w3_ceiling.md` 可达上限分析 |
 | `tests/` | 单元测试与回归用例 |
 | `traces/`, `results/` | 运行产物，自动创建、不入库 |
 
@@ -160,11 +160,29 @@ python -m eval.ab_sweep --treatment idempotency                 # 换一条护�
 
 口径同上一节：描述性统计、**不是显著性检验**，seed 人为选定、不是随机抽样；全部来自确定性模拟器，不构成真实模型能力 / 成本 / 延迟结论；`[GUARD-REJECT]` 在真实模型下能否被读懂并改对仍是开放项。既有 6 个 `run_id`、5 份归档报告、`w3_guard_matrix.md`、`w3_robustness.*` 与冻结基线全部一字节未动。
 
-剩余护栏（上下文压缩、token / 步数预算）继续「一组一条」，用 `--treatment <护栏名>` 复用同一套扫描能力。
+## W3 收口：第四条护栏与可达上限分析
+
+第四条护栏 `json_recovery` 补的是四类注入故障里最后一个缺口 `bad_json`。W1 的 JSON 重试只给 `RETRY_HINT` 提示、会**跳过被替换掉的那个动作**；这条护栏保留原提示证据（grader 的 `output_format` 归因链路不变），只额外追加一个 `role=guard` 的 span 与一条 `[GUARD-REJECT]` 消息，让后端重发那一个干净动作。T06 那种脚本固有的连续坏 JSON 没有干净动作可重发，仍收敛到 `TERMINATION_JSON_FAILURE`——护栏不越界。
+
+**最重要的结果是「单变量 A/B 会低估它」**：seed=11 单开是 0.10 → 0.10 的**零效应**，30 个 seed 也只有正 5 / 零 25 / 负 0（均值 +0.0167）；但四条护栏全开把 8 个 seed 补到上限，30/30 个 seed 与「关掉注入故障 + 四条全开」逐 seed 相等。原因不是护栏弱，而是 `pass^k` 要求 k 次全过——其他三类故障还在时，恢复一个 `bad_json` 不产生任何分数变化。**只看单变量 A/B 会得出「这条护栏没用」的错误结论。**
+
+`eval/ceiling.py` 把这件事做成 [可达上限分析](experiments/w3_ceiling.md)：九格 × 30 seed，两个口径陷阱被钉死——
+
+- **fpm=0 不是天花板**：关掉注入故障且不开启护栏时 `pass^k` 只有 0.2000，反而低于四条全开 0.3000，因为 `idempotency` 还修了任务脚本里**固有的重复写**。拿它当分母算「达成率」会得到 >100% 的荒谬数字；W3 的对照组始终是 `fpm=60` 的 OFF 组。
+- **剩余 gap 不该由护栏修**：10 条任务里 7 条在任何护栏组合、任何 seed 下都 k 次全不过，全是脚本固有缺陷（坏 JSON、缺参数、错工具、无 final、超退、少说必要告知）。让护栏去修它们等于让评测替模型做对，是作弊不是可靠性提升。清单由证据自动推导、不硬编码任务 ID。
+
+```bash
+python -m eval.run --config experiments/guard_ab_json_recovery.toml   # 单变量 A/B 留档
+python -m eval.ab_sweep --treatment json_recovery                       # 同一 30-seed 集的符号分布
+python -m eval.ceiling                                                  # 九格可达上限分析
+python -m eval.ceiling --from-jsonl                                      # 只读证据重渲染
+```
+
+**W3 护栏阶段收口**：四类注入故障（`bad_json` / `bad_args` / `wrong_tool` / `duplicate_call`）已有四条护栏覆盖，组合达到当前任务集的可达上限，不再追加「又能涨 0.10」的护栏。路线表剩余的上下文压缩 / token 与步数预算在确定性模拟器上**没有可观测的测量输入**（`prompt_tokens` 恒 0、没有真实上下文窗口、`MAX_STEPS` 是 W1 固定常量），硬塞开关等于换测量仪器；它们要等 W4 接真实模型、构造有成本压力的任务集后才可测。下一步该做的是提高 `pass^k` 分辨率（扩任务集 / 提高 k / 把固有缺陷分层标注），以及验证 `[GUARD-REJECT]` 在真实模型下能否被读懂并改对。
 
 ## 开发路线
 
-> W1 全部、W2 全量、P0 实验记录体系、W2.5 校准，以及 W3 三条护栏的单变量 A/B、2×2 全因子与多种子稳健性检验已落地；冻结基线见 [experiments/mvp_baseline.md](experiments/mvp_baseline.md)。
+> W1 全部、W2 全量、P0 实验记录体系、W2.5 校准，以及 W3 四条护栏、2×2 全因子、多种子稳健性检验与可达上限分析已落地（护栏阶段收口）；冻结基线见 [experiments/mvp_baseline.md](experiments/mvp_baseline.md)。
 
 | 阶段 | 交付 |
 | --- | --- |
@@ -173,7 +191,7 @@ python -m eval.ab_sweep --treatment idempotency                 # 换一条护�
 | P0 | 实验配置版本化、`run_id` 留档、冻结基线与报告 diff（已交付） |
 | W2 余项 | `ModelReply` 真实观测、条件话术、trace 首个偏离点归因与证据入库（已交付） |
 | W2.5 | `SeededBackend` 校准 `pass^k` 区分度，零成本、不接真实模型（已交付） |
-| W3 | 逐项修运行时，每组只改一个变量：参数 `schema_validation`、幂等键 `idempotency` 及其 2×2 主效应 / 交互、30 个 seed 的稳健性检验、失败后重试 `tool_retry` 及其跨 seed A/B（已交付）；预算、压缩待续，每组须附多 seed 符号分布 |
+| W3 | 逐项修运行时，每组只改一个变量：`schema_validation` / `idempotency` 的 2×2 主效应 / 交互、30 个 seed 的稳健性检验、`tool_retry` 与 `json_recovery` 的跨 seed A/B，以及九格可达上限分析并收口（已交付）；上下文压缩 / 预算转到 W4 真实模型阶段 |
 | W4 | 4–6 组单变量对照实验，出成功率 / 成本帕累托图 |
 | W5 | 服务化、并发、容器化、trace 回放、测试 |
 | W6 | 中文扩展任务集、结果表、复现文档 |

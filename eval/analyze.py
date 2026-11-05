@@ -12,7 +12,11 @@ from typing import Any
 from eval.config import ExperimentConfig
 from eval.grader import FAILURE_TYPES, NO_FAILURE
 from eval.runner import Row, Task
-from runtime.guard import GUARD_IDEMPOTENCY, GUARD_TOOL_RETRY
+from runtime.guard import (
+    GUARD_IDEMPOTENCY,
+    GUARD_JSON_RECOVERY,
+    GUARD_TOOL_RETRY,
+)
 
 
 def summarize(rows: list[Row], k: int) -> dict[str, Any]:
@@ -117,6 +121,19 @@ def _caveats(config: ExperimentConfig) -> list[str]:
                     "若后续动作本身也有缺陷就会再报一次错；论效果仍只能看 `pass^k`。重试受共享的 "
                     "`MAX_GUARD_REJECTIONS` 上限约束，不做真实 sleep、不引入指数延迟，"
                     "以保证逐字节可复现；grader 的判分口径不因开关而改变。"
+                )
+            elif GUARD_JSON_RECOVERY in config.guards:
+                # 格式错误发生在 tools.call 之前，invalid_calls 与这条护栏无关；
+                # 保留 RETRY_HINT 证据使 grader 的 output_format 归因链路不变。
+                mechanism = (
+                    "- `json_recovery` 修的是**输出格式失败**：W1 的 JSON 重试只给出 "
+                    "`RETRY_HINT` 提示，被替换掉的那个动作会被直接跳过。这条护栏在"
+                    "保留原提示证据的基础上，额外追加一个 `role=guard` 的 span 与一条 "
+                    "`[GUARD-REJECT]` 消息，让后端重发那一个动作；脚本里固有的连续坏 "
+                    "JSON 没有干净动作可重发，依然失败——护栏没有越界。**格式错误不进入 "
+                    "`tools.call`，`invalid_calls` 与这条护栏无关**，论效果只看 `pass^k`；"
+                    "grader 的归因与判分口径不因开关而改变。恢复受共享的 "
+                    "`MAX_GUARD_REJECTIONS` 上限约束，保证逐字节可复现。"
                 )
             else:
                 mechanism = (

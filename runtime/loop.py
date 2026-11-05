@@ -113,10 +113,12 @@ def run_turn(
     errors），而是把 ``GUARD_REJECT_PREFIX`` 消息追加进 messages，让后端
     有机会重发正确调用。第三条 ``tool_retry`` 在工具层**报错之后**工作：
     如实保留 tool span 与 errors，只额外追加一条拒绝消息触发重发，因此
-    ``invalid_calls`` 的口径不因开关而改变。guard span 只作证据，grader
-    不消费这个 role，因此判分口径不因开启护栏而改变。三条护栏共用同一
-    拦截预算，判定顺序固定为 schema → idempotency → tool_retry，避免
-    结果依赖集合遍历顺序。
+    ``invalid_calls`` 的口径不因开关而改变。第四条 ``json_recovery`` 在
+    JSON 解析失败之后工作：**保留 W1 的 RETRY_HINT 证据**，只额外追加一条
+    拒绝消息，让后端重发被跳过的那一个动作，覆盖 ``bad_json`` 注入故障。
+    guard span 只作证据，grader 不消费这个 role，因此判分口径不因开启
+    护栏而改变。四条护栏共用同一拦截预算；前两条在工具执行前按固定顺序
+    判定，后两条各占一个独立分支，结果不依赖集合遍历顺序。
     """
     result = TurnResult()
     consecutive_format_errors = 0
@@ -152,6 +154,27 @@ def run_turn(
                     observation=f"{RETRY_HINT} ({reason})",
                 )
             )
+            # 第四条护栏：W1 的 JSON 重试只提示，被替换掉的动作会被跳过。
+            # 保留上面的 RETRY_HINT user span（grader 据此归因 output_format），
+            # 只额外追加 guard span 与一条 [GUARD-REJECT] 消息触发重发。
+            # 固有的连续坏 JSON 没有干净动作可重发，会自然收敛到
+            # TERMINATION_JSON_FAILURE，护栏不越界去修它。
+            if (
+                guard.GUARD_JSON_RECOVERY in guards
+                and reason in guard.RECOVERABLE_FORMAT_REASONS
+                and guard_rejections < guard.MAX_GUARD_REJECTIONS
+            ):
+                recovery = guard.json_recovery_hint(reason)
+                guard_rejections += 1
+                result.spans.append(
+                    make_span(
+                        trial_id,
+                        counter.next(),
+                        "guard",
+                        observation=recovery,
+                    )
+                )
+                messages.append({"role": "user", "content": recovery})
             if consecutive_format_errors > max_json_retries:
                 result.termination = TERMINATION_JSON_FAILURE
                 return result

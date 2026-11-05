@@ -108,8 +108,9 @@ FINAL = {"final": "done"}
 
 class TestRetryRules(unittest.TestCase):
     def test_guard_names_are_ordered_and_whitelisted(self):
+        # 前三条的顺序是既有留档的判定顺序，必须钉死；新护栏只允许追加在末尾。
         self.assertEqual(
-            guard.GUARD_NAMES,
+            guard.GUARD_NAMES[:3],
             (
                 guard.GUARD_SCHEMA_VALIDATION,
                 guard.GUARD_IDEMPOTENCY,
@@ -117,6 +118,7 @@ class TestRetryRules(unittest.TestCase):
             ),
         )
         self.assertEqual(RETRY, "tool_retry")
+        self.assertIn(guard.GUARD_JSON_RECOVERY, guard.GUARD_NAMES)
 
     def test_retryable_errors_are_exactly_the_validation_failures(self):
         self.assertEqual(

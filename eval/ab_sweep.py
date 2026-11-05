@@ -31,7 +31,11 @@ from typing import Any, Sequence
 
 from eval import analyze, runner, robustness
 from eval.config import resolve_input
-from runtime.guard import GUARD_NAMES, GUARD_TOOL_RETRY
+from runtime.guard import (
+    GUARD_JSON_RECOVERY,
+    GUARD_NAMES,
+    GUARD_TOOL_RETRY,
+)
 from runtime.model import BackendConfig
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -282,38 +286,72 @@ def render_sweep(records: Sequence[Record], treatment: str) -> str:
             "",
         ]
 
+    lines += ["## 机制：这条护栏到底修了什么", ""]
+    if treatment == GUARD_TOOL_RETRY:
+        lines += [
+            f"`{treatment}` 是路线表里「退避」在本同步确定性 harness 里的落地形态："
+            "工具层报错后追加一条 `[GUARD-REJECT]` 消息要求重发，重试受共享的 "
+            "`MAX_GUARD_REJECTIONS` 上限约束。**不做真实 sleep、不引入指数延迟**——"
+            "那会破坏逐字节复现，也不是本实验的自变量。",
+            "",
+            "四类人为缺陷与运行时机制的归属（互不重叠，便于单变量归因）：",
+            "",
+            "| 缺陷 | 既有机制 | `tool_retry` |",
+            "| --- | --- | --- |",
+            "| `bad_json` | W1 的 JSON 重试（只提示，不恢复被跳过的动作） | 不触发：未进入 `tools.call` |",
+            "| `bad_args` | `schema_validation` 在执行前拦下 | 工具报错后重发 |",
+            "| `wrong_tool` | 两条执行前护栏都明确放行 | **唯一能覆盖它的护栏** |",
+            "| `duplicate_call` | `idempotency` 拦重复写 | 工具层不报错，不触发 |",
+            "",
+            "- **只有可恢复的注入故障能被修好**。`SeededBackend` 注入故障时会把干净动作"
+            "存进 `_pending_correct`，护栏的拒绝消息才能触发它重发；任务脚本里**固有的**"
+            "缺陷（如 `T07` 的 `refund_money` 错工具、`T08` 的 `refund_order` 缺参数）"
+            "没有这份干净动作，重发只是让后端推进到下一个脚本项。这些 trial 在 trace 里"
+            "照样产生 `role=guard` 的 span，但任务仍然失败——护栏没有越界去修固有缺陷。",
+            "- **错误证据如实保留**：报错的 `tool` span 与 `errors` 都在原处，护栏只额外"
+            "追加一个 `guard` span 与一条拒绝消息，因此 `invalid_calls` **不会因这条护栏"
+            "而下降，只会持平或上升**：错误确实发生过一次，重发又会让后端多消耗一次输出，"
+            "若后续动作本身也有缺陷就会再报一次错。本轮两组合计的变化见上表；"
+            "中间指标下降、持平、上升都不能替代 `pass^k`。"
+            "`grader` 不消费 `guard` span，判分口径不因开关改变。",
+            "- **正效应 seed 集合与既有两条护栏不是包含关系**：作用位置不同（执行前 vs "
+            "失败后），在不同随机流下各有独自生效的 seed。不能因为「多覆盖一类错误」就"
+            "推断它必然更优；逐 seed 的符号分布才是可复现证据。",
+            "",
+        ]
+    elif treatment == GUARD_JSON_RECOVERY:
+        lines += [
+            f"`{treatment}` 覆盖四类注入故障里最后一条没有护栏覆盖的类别：`bad_json`。"
+            "W1 的 JSON 重试只给出 `RETRY_HINT` 提示，被替换掉的那个动作会被直接跳过；"
+            "本护栏**保留原提示证据**（grader 据此仍归因 `output_format`），只额外追加一个 "
+            "`role=guard` 的 span 与一条 `[GUARD-REJECT]` 消息，让 `SeededBackend` 重发"
+            "那一个干净动作。脚本里固有的连续坏 JSON 没有干净动作可重发，会自然收敛到 "
+            "`TERMINATION_JSON_FAILURE`，护栏不越界。",
+            "",
+            "| 缺陷 | 既有机制 | `json_recovery` |",
+            "| --- | --- | --- |",
+            "| `bad_json` | W1 的 JSON 重试只提示、跳过动作 | **唯一能恢复被跳过动作的护栏** |",
+            "| `bad_args` | `schema_validation` / `tool_retry` | 不触发：JSON 合法 |",
+            "| `wrong_tool` | `tool_retry` | 不触发：JSON 合法 |",
+            "| `duplicate_call` | `idempotency` | 不触发：JSON 合法 |",
+            "",
+            "- **格式错误不进入 `tools.call`**，所以 `invalid_calls` 与这条护栏无关；"
+            "论效果只看 `pass^k`。恢复受共享的 `MAX_GUARD_REJECTIONS` 上限约束，"
+            "不做真实 sleep，保证逐字节可复现；`grader` 的归因与判分口径不因开关改变。",
+            "- **单变量 A/B 会低估这类护栏**：`pass^k` 要求 k 次全过，其他三类注入故障"
+            "还在时，恢复一个 `bad_json` 往往不产生分数变化。它的价值要在「前三条护栏"
+            "全开」的组合里才显出来 —— 见 [可达上限分析](w3_ceiling.md)：四条全开把"
+            "残余 gap 归零，且逐 seed 等于「关掉注入故障 + 四条全开」。",
+            "",
+        ]
+    else:
+        lines += [
+            f"`{treatment}` 由 `ab_sweep` 沿用同一套 30-seed 单变量 A/B 口径扫描；"
+            "具体机制见 `runtime/guard.py` 与对应留档报告。"
+            "**论效果只看 `pass^k`**，中间指标的升降或持平都不能当代理。",
+            "",
+        ]
     lines += [
-        "## 机制：这条护栏到底修了什么",
-        "",
-        f"`{treatment}` 是路线表里「退避」在本同步确定性 harness 里的落地形态："
-        "工具层报错后追加一条 `[GUARD-REJECT]` 消息要求重发，重试受共享的 "
-        "`MAX_GUARD_REJECTIONS` 上限约束。**不做真实 sleep、不引入指数延迟**——"
-        "那会破坏逐字节复现，也不是本实验的自变量。",
-        "",
-        "四类人为缺陷与运行时机制的归属（互不重叠，便于单变量归因）：",
-        "",
-        "| 缺陷 | 既有机制 | `tool_retry` |",
-        "| --- | --- | --- |",
-        "| `bad_json` | W1 的 JSON 重试（只提示，不恢复被跳过的动作） | 不触发：未进入 `tools.call` |",
-        "| `bad_args` | `schema_validation` 在执行前拦下 | 工具报错后重发 |",
-        "| `wrong_tool` | 两条执行前护栏都明确放行 | **唯一能覆盖它的护栏** |",
-        "| `duplicate_call` | `idempotency` 拦重复写 | 工具层不报错，不触发 |",
-        "",
-        "- **只有可恢复的注入故障能被修好**。`SeededBackend` 注入故障时会把干净动作"
-        "存进 `_pending_correct`，护栏的拒绝消息才能触发它重发；任务脚本里**固有的**"
-        "缺陷（如 `T07` 的 `refund_money` 错工具、`T08` 的 `refund_order` 缺参数）"
-        "没有这份干净动作，重发只是让后端推进到下一个脚本项。这些 trial 在 trace 里"
-        "照样产生 `role=guard` 的 span，但任务仍然失败——护栏没有越界去修固有缺陷。",
-        "- **错误证据如实保留**：报错的 `tool` span 与 `errors` 都在原处，护栏只额外"
-        "追加一个 `guard` span 与一条拒绝消息，因此 `invalid_calls` **不会因这条护栏"
-        "而下降，只会持平或上升**：错误确实发生过一次，重发又会让后端多消耗一次输出，"
-        "若后续动作本身也有缺陷就会再报一次错。本轮两组合计的变化见上表；"
-        "中间指标下降、持平、上升都不能替代 `pass^k`。"
-        "`grader` 不消费 `guard` span，判分口径不因开关改变。",
-        "- **正效应 seed 集合与既有两条护栏不是包含关系**：作用位置不同（执行前 vs "
-        "失败后），在不同随机流下各有独自生效的 seed。不能因为「多覆盖一类错误」就"
-        "推断它必然更优；逐 seed 的符号分布才是可复现证据。",
-        "",
         "## 口径与限制（读表前先看）",
         "",
         "- **不是显著性检验**：没有置信区间、没有 p 值、不做多重比较校正。这里只是把"
