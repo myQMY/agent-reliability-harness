@@ -12,7 +12,7 @@ from typing import Any
 from eval.config import ExperimentConfig
 from eval.grader import FAILURE_TYPES, NO_FAILURE
 from eval.runner import Row, Task
-from runtime.guard import GUARD_IDEMPOTENCY
+from runtime.guard import GUARD_IDEMPOTENCY, GUARD_TOOL_RETRY
 
 
 def summarize(rows: list[Row], k: int) -> dict[str, Any]:
@@ -105,6 +105,18 @@ def _caveats(config: ExperimentConfig) -> list[str]:
                     "会让它下降，但任务仍可能失败（归因从 `bad_args` 变成 `unknown`）；"
                     "`idempotency` 拦下的是工具层**不报错**的重复写，`invalid_calls` 可以"
                     "完全不变而 `pass^k` 提升。论效果只看 `pass^k`。"
+                )
+            elif GUARD_TOOL_RETRY in config.guards:
+                # 重试发生在工具报错之后，errors 如实保留，旧版「不写库、
+                # 不计入 invalid_calls」的措辞对这条护栏是错的。
+                mechanism = (
+                    "- `tool_retry` 在**工具层报错之后**工作：如实保留报错的 tool span 与 "
+                    "`errors`，只额外产生一个 `role=guard` 的 span 与一条拒绝消息，"
+                    "让后端重发干净动作。因此 **`invalid_calls` 不会因这条护栏而下降**"
+                    "（只会持平或上升）——错误确实发生过一次，重发又会让后端多消耗一次输出，"
+                    "若后续动作本身也有缺陷就会再报一次错；论效果仍只能看 `pass^k`。重试受共享的 "
+                    "`MAX_GUARD_REJECTIONS` 上限约束，不做真实 sleep、不引入指数延迟，"
+                    "以保证逐字节可复现；grader 的判分口径不因开关而改变。"
                 )
             else:
                 mechanism = (

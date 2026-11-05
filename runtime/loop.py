@@ -109,11 +109,14 @@ def run_turn(
     专用的跨 turn 状态，由 runner 在一次 trial 里创建并复用；不传则为 None，
     该护栏不生效，因此只开 schema_validation 的既有留档逐字节不变。
 
-    护栏拦截只发生在工具执行之前：拦下时不调 tools.call（不写库、不计入
+    前两条护栏在工具执行**之前**拦截：拦下时不调 tools.call（不写库、不计入
     errors），而是把 ``GUARD_REJECT_PREFIX`` 消息追加进 messages，让后端
-    有机会重发正确调用。guard span 只作证据，grader 不消费这个 role，
-    因此判分口径不因开启护栏而改变。两条护栏共用同一拦截预算，判定顺序
-    固定为 schema_validation → idempotency，避免结果依赖集合遍历顺序。
+    有机会重发正确调用。第三条 ``tool_retry`` 在工具层**报错之后**工作：
+    如实保留 tool span 与 errors，只额外追加一条拒绝消息触发重发，因此
+    ``invalid_calls`` 的口径不因开关而改变。guard span 只作证据，grader
+    不消费这个 role，因此判分口径不因开启护栏而改变。三条护栏共用同一
+    拦截预算，判定顺序固定为 schema → idempotency → tool_retry，避免
+    结果依赖集合遍历顺序。
     """
     result = TurnResult()
     consecutive_format_errors = 0
@@ -209,3 +212,24 @@ def run_turn(
                 ),
             }
         )
+        # 第三条护栏：失败之后请求重发。tool span / errors / tool 观察全部
+        # 保留，trace 因此能完整还原「工具报错 → 护栏要求重发 → 重发成功」。
+        if (
+            error is not None
+            and error in guard.RETRYABLE_TOOL_ERRORS
+            and guard.GUARD_TOOL_RETRY in guards
+            and guard_rejections < guard.MAX_GUARD_REJECTIONS
+        ):
+            retry = guard.tool_retry_message(name, error)
+            guard_rejections += 1
+            result.spans.append(
+                make_span(
+                    trial_id,
+                    counter.next(),
+                    "guard",
+                    tool=name,
+                    args=args,
+                    observation=retry,
+                )
+            )
+            messages.append({"role": "user", "content": retry})

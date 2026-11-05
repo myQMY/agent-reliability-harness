@@ -2,19 +2,24 @@
 
 护栏的开关来自实验配置（eval/config.py），默认全部关闭：这是 W3 单变量
 对照实验的前提——OFF 组必须与 W1 冻结基线逐字节等价，任何护栏都不能
-悄悄改变默认行为。两条护栏共用同一个拦截预算与 ``GUARD_REJECT_PREFIX``
-协议，判定顺序在 loop.py 里固定为 schema_validation → idempotency，
-保证结果确定、可归因。
+悄悄改变默认行为。三条护栏共用同一个拦截预算与 ``GUARD_REJECT_PREFIX``
+协议，判定顺序在 loop.py 里固定为 schema_validation → idempotency（都在
+工具执行前）→ tool_retry（工具报错之后），保证结果确定、可归因。
 
 - ``schema_validation``：只做参数 schema 校验，规则与工具层共用
   env/tools.validate_args；工具名合法性、业务策略都不归它管。
 - ``idempotency``：为写工具调用从 ``(tool, args)`` 确定性派生幂等键，
   在同一 trial 内对**已成功执行**的重复写拦截。键只在内存里、只在本次
   trial 有效，不承诺持久化幂等；未知工具 / 读工具 / 失败调用都不记账。
+- ``tool_retry``：工具层报错后触发重发。与前两条不同，它工作在**失败之后**：
+  如实保留报错的 tool span 与 ``errors``，只额外追加一条拒绝消息让后端
+  重发干净动作。这是路线表里「退避」在本同步确定性 harness 里的落地形态——
+  固定次数重试预算，不做真实 sleep、不引入指数延迟，否则会破坏逐字节复现。
 
-它与工具层报错的区别都在**位置**：工具层报错会让这次调用的动作直接
-丢失，护栏则在工具执行前拦下、把拒绝原因写进 messages，让后端有机会
-重发正确调用——这才是 harness 可测量的价值。
+前两条护栏与工具层报错的区别都在**位置**：工具层报错会让这次调用的动作直接
+丢失，执行前护栏则拦下并把拒绝原因写进 messages，让后端有机会重发正确调用
+——这才是 harness 可测量的价值。``tool_retry`` 把同一个协议延伸到失败之后，
+覆盖 ``wrong_tool`` 这类执行前护栏明确放行的错误。
 
 token / 延迟观测不在这里：它们由 Backend.generate 返回的 ModelReply 提供，
 ScriptedBackend / SeededBackend 恒为 0，OpenAIBackend 为真实值。
@@ -37,12 +42,18 @@ GUARD_REJECT_PREFIX = "[GUARD-REJECT]"
 
 GUARD_SCHEMA_VALIDATION = "schema_validation"
 GUARD_IDEMPOTENCY = "idempotency"
+GUARD_TOOL_RETRY = "tool_retry"
 
 # 已实现的护栏白名单；配置里出现其他名字直接报错，杜绝「写了但没接上」。
-# 顺序同时是 loop.py 的判定顺序与报告里 --guard 的输出顺序，不要随意调整。
-GUARD_NAMES = (GUARD_SCHEMA_VALIDATION, GUARD_IDEMPOTENCY)
+# 顺序同时是 loop.py 的判定顺序与报告里 --guard 的输出顺序，不要随意调整：
+# 前两条在 tools.call 之前、第三条在它返回错误之后。
+GUARD_NAMES = (GUARD_SCHEMA_VALIDATION, GUARD_IDEMPOTENCY, GUARD_TOOL_RETRY)
 
-# 同一 turn 内最多拦截次数（两条护栏共享）。脚本后端不响应拒绝消息，
+# 工具层可能返回的错误；这些错误都在 _validate 阶段被拦下、没有写入状态，
+# 因此重发干净动作是安全的。业务策略违规不在这里（工具层故意不检查策略）。
+RETRYABLE_TOOL_ERRORS = (tools.WRONG_TOOL, tools.BAD_ARGS)
+
+# 同一 turn 内最多拦截 / 重试次数（三条护栏共享）。脚本后端不响应拒绝消息，
 # 若没有这个上限，连续的坏参数动作会被反复拦下直到吃光 MAX_STEPS。
 MAX_GUARD_REJECTIONS = 3
 
@@ -135,3 +146,17 @@ def record_write(name: str, args: Any, state: GuardState | None) -> None:
     """工具层**成功执行**后才记账；报错的调用本来就没改变状态，不算重复。"""
     if state is not None and name in tools.WRITE_TOOLS:
         state.executed_write_keys.add(idempotency_key(name, args))
+
+
+def tool_retry_message(name: str, error: str) -> str:
+    """tool_retry 的拒绝文本：工具层报错之后要求后端重发完整调用。
+
+    只由 ``RETRYABLE_TOOL_ERRORS`` 里的错误触发。文本里明确写「没有写入状态」，
+    因为工具层在 ``_validate`` 阶段就返回了，重发不会造成重复副作用；
+    这也让真实模型能理解为什么需要重发，而不是把报错当成任务失败。
+    """
+    return (
+        f"{GUARD_REJECT_PREFIX} 工具 {name} 的调用在工具层失败（{error}），"
+        "这次调用没有写入任何状态。请重新输出这一个完整的工具调用，"
+        "工具名与参数都按任务要求写对。"
+    )

@@ -2,7 +2,7 @@
 
 面向多轮工具调用 Agent 的可靠性评测与运行时平台。
 
-> 状态：W1 全部、W2 全量（判分 / trace / 真实模型观测 / 条件话术 / trace 归因）、P0 实验记录体系、W2.5 测量链路校准，以及 W3 两条护栏（`schema_validation` / `idempotency`）的 2×2 全因子实验与多种子稳健性检验已落地。本文件不写任何未经验证的结论；所有指标以 `experiments/` 下可复现的结果为准。
+> 状态：W1 全部、W2 全量（判分 / trace / 真实模型观测 / 条件话术 / trace 归因）、P0 实验记录体系、W2.5 测量链路校准，以及 W3 三条护栏（`schema_validation` / `idempotency` / `tool_retry`）的单变量 A/B、2×2 全因子与多种子稳健性检验已落地。本文件不写任何未经验证的结论；所有指标以 `experiments/` 下可复现的结果为准。
 
 ## 为什么做这个
 
@@ -27,7 +27,7 @@ Agent demo 和能稳定运行的 Agent 之间，差的通常不是模型能力�
 | `eval/` | 用户模拟器、批量执行器、终态判分、归因分析、CLI |
 | `web/` | trace 回放与实验对照面板（W5） |
 | `docs/` | 产品设计与技术实现方案 |
-| `experiments/` | 版本化实验配置（`config.toml` / `calibration.toml` / `guard_ab_*.toml`）、冻结基线、按 `run_id` 留档的报告与结果行、`w3_guard_matrix.md` 因子汇总、`w3_robustness.md` 多种子稳健性检验 |
+| `experiments/` | 版本化实验配置（`config.toml` / `calibration.toml` / `guard_ab_*.toml`）、冻结基线、按 `run_id` 留档的报告与结果行、`w3_guard_matrix.md` 因子汇总、`w3_robustness.md` 多种子稳健性检验、`w3_tool_retry_sweep.md` 第三条护栏的跨 seed A/B |
 | `tests/` | 单元测试与回归用例 |
 | `traces/`, `results/` | 运行产物，自动创建、不入库 |
 
@@ -131,11 +131,40 @@ python -m eval.robustness --from-jsonl    # 只读证据重渲染，不重跑评
 
 **口径**：这是描述性统计，**不是显著性检验**，没有置信区间与 p 值；seed 是人为选定的整数、不是随机抽样，「30 个里 X 个为正」不能当概率估计，更不能外推到真实模型；全部数字来自确定性模拟器，不构成能力 / 成本 / 延迟结论。因此既有报告里的 +0.10 / +0.10 只描述那一次随机流，**不能外推**为普遍效应。
 
-后续每条护栏（上下文压缩、token / 步数预算、退避）仍按「一组一条、单变量 A/B」推进，但每组都应给出同一 seed 集上的符号分布；只报一个 seed 的 A/B 不算可复现结论。
+后续每条护栏仍按「一组一条、单变量 A/B」推进，但每组都应给出同一 seed 集上的符号分布；只报一个 seed 的 A/B 不算可复现结论。
+
+## W3 第三条护栏：工具失败后的确定性重试
+
+这一轮把上面那条纪律做成了可复用能力，同时交付路线表里的「退避」——在本同步确定性 harness 里落地为 **`tool_retry`**：工具层报错后追加 `[GUARD-REJECT]` 要求重发，固定次数重试预算，**不做真实 sleep、不引入指数延迟**（那会破坏逐字节复现，也不是本实验的自变量）。
+
+| 护栏 | 管什么 | 不管什么 |
+| --- | --- | --- |
+| `tool_retry` | `tools.call` 返回 `wrong_tool` / `bad_args` 后请求重发；**唯一能覆盖 `wrong_tool` 的护栏** | 坏 JSON（未进工具层）、重复写（工具层不报错）、业务策略、脚本固有缺陷 |
+
+与前两条护栏的关键差别在**位置**：`schema_validation` / `idempotency` 在 `tools.call` 之前拦下，不写库、不记 `errors`；`tool_retry` 在报错之后工作，**如实保留报错的 tool span 与 `errors`**，只额外追加一个 `role=guard` 的 span 与一条拒绝消息，trace 因此能还原「报错 → 要求重发 → 重发成功」的完整链路。三条护栏共用 `MAX_GUARD_REJECTIONS` 预算。
+
+四类人为缺陷与机制一一对应：`bad_json` → W1 的 JSON 重试（只提示、不恢复被跳过的动作）；`bad_args` → `schema_validation`（执行前）/ `tool_retry`（失败后）；`wrong_tool` → 仅 `tool_retry`；`duplicate_call` → `idempotency`。**只有带 `_pending_correct` 的可恢复注入故障能被修好**：T07（`refund_money` 错工具）、T08（`refund_order` 缺参数）这类脚本固有缺陷照样产生 guard span，但重发只是让后端推进到下一个动作，任务仍失败——护栏没有越界。
+
+```bash
+python -m eval.run --config experiments/guard_ab_retry.toml   # 单变量 A/B（seed=11）
+python -m eval.ab_sweep                                        # 同一 30-seed 集的符号分布
+python -m eval.ab_sweep --from-jsonl                            # 只读证据重渲染
+python -m eval.ab_sweep --treatment idempotency                 # 换一条护栏复用同一能力
+```
+
+`eval/ab_sweep.py` 把「OFF / ON 两组 × 30 个 seed」做成通用纯函数 + CLI：seed 集与测量输入全部复用 `eval/robustness.py` 的常量，CLI 不允许覆盖，避免一次检查混入第二个自变量；不读时钟、零第三方依赖、跑批只写临时目录。证据在 `w3_tool_retry_sweep.jsonl`，报告在 [experiments/w3_tool_retry_sweep.md](experiments/w3_tool_retry_sweep.md)。
+
+**实测结果**：单变量 A/B（seed=11）pass³ 0.10 → 0.20、`pass¹` 0.20 → 0.20、`invalid_calls` 7 → 7，唯一翻转的 trial 是 `T01-t2`。放到 30 个 seed 上，Δpass^k 为**正 9 / 零 21 / 负 0**（均值 +0.0300），没有负效应，但远不如 `idempotency`（27/30 为正）；两组合计 `invalid_calls` 241 → 247——`tool_retry` 保留原错误，重发又可能让后续缺陷动作再报一次错，所以这个指标**只会持平或上升**。这是「中间指标不是成功率代理」的第三个方向：下降、持平、上升都不能替代 `pass^k`。
+
+**一个反直觉但更有价值的发现**：`tool_retry` 的正效应 seed 集合与 `schema_validation` **不是包含关系**——前者独有 `{5, 13, 2048, 4096, 12345}`，后者独有 `{9001}`，由 `tests/test_tool_retry_guard.py` 钉死。作用位置不同（执行前 vs 失败后），在不同随机流下各有胜负；**不能因为「多覆盖一类错误」就推断它必然更优**。
+
+口径同上一节：描述性统计、**不是显著性检验**，seed 人为选定、不是随机抽样；全部来自确定性模拟器，不构成真实模型能力 / 成本 / 延迟结论；`[GUARD-REJECT]` 在真实模型下能否被读懂并改对仍是开放项。既有 6 个 `run_id`、5 份归档报告、`w3_guard_matrix.md`、`w3_robustness.*` 与冻结基线全部一字节未动。
+
+剩余护栏（上下文压缩、token / 步数预算）继续「一组一条」，用 `--treatment <护栏名>` 复用同一套扫描能力。
 
 ## 开发路线
 
-> W1 全部、W2 全量、P0 实验记录体系、W2.5 校准，以及 W3 两条护栏的 2×2 全因子实验与多种子稳健性检验已落地；冻结基线见 [experiments/mvp_baseline.md](experiments/mvp_baseline.md)。
+> W1 全部、W2 全量、P0 实验记录体系、W2.5 校准，以及 W3 三条护栏的单变量 A/B、2×2 全因子与多种子稳健性检验已落地；冻结基线见 [experiments/mvp_baseline.md](experiments/mvp_baseline.md)。
 
 | 阶段 | 交付 |
 | --- | --- |
@@ -144,7 +173,7 @@ python -m eval.robustness --from-jsonl    # 只读证据重渲染，不重跑评
 | P0 | 实验配置版本化、`run_id` 留档、冻结基线与报告 diff（已交付） |
 | W2 余项 | `ModelReply` 真实观测、条件话术、trace 首个偏离点归因与证据入库（已交付） |
 | W2.5 | `SeededBackend` 校准 `pass^k` 区分度，零成本、不接真实模型（已交付） |
-| W3 | 逐项修运行时，每组只改一个变量：参数 `schema_validation`、幂等键 `idempotency` 及其 2×2 主效应 / 交互、30 个 seed 的稳健性检验（已交付）；预算、压缩、退避待续，每组须附多 seed 符号分布 |
+| W3 | 逐项修运行时，每组只改一个变量：参数 `schema_validation`、幂等键 `idempotency` 及其 2×2 主效应 / 交互、30 个 seed 的稳健性检验、失败后重试 `tool_retry` 及其跨 seed A/B（已交付）；预算、压缩待续，每组须附多 seed 符号分布 |
 | W4 | 4–6 组单变量对照实验，出成功率 / 成本帕累托图 |
 | W5 | 服务化、并发、容器化、trace 回放、测试 |
 | W6 | 中文扩展任务集、结果表、复现文档 |
