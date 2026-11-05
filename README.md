@@ -2,7 +2,7 @@
 
 面向多轮工具调用 Agent 的可靠性评测与运行时平台。
 
-> 状态：W1 全部、W2 全量（判分 / trace / 真实模型观测 / 条件话术 / trace 归因）、P0 实验记录体系、W2.5 测量链路校准，以及 W3 四条护栏（`schema_validation` / `idempotency` / `tool_retry` / `json_recovery`）的单变量 A/B、2×2 全因子、多种子稳健性检验与可达上限分析已落地。本文件不写任何未经验证的结论；所有指标以 `experiments/` 下可复现的结果为准。
+> 状态：W1 全部、W2 全量（判分 / trace / 真实模型观测 / 条件话术 / trace 归因）、P0 实验记录体系、W2.5 测量链路校准，以及 W3 四条护栏（`schema_validation` / `idempotency` / `tool_retry` / `json_recovery`）的单变量 A/B、2×2 全因子、多种子稳健性检验、可达上限分析，以及 W3 收口后的 `pass^k` 分辨率与效应掩蔽审计已落地。本文件不写任何未经验证的结论；所有指标以 `experiments/` 下可复现的结果为准。
 
 ## 为什么做这个
 
@@ -27,7 +27,7 @@ Agent demo 和能稳定运行的 Agent 之间，差的通常不是模型能力�
 | `eval/` | 用户模拟器、批量执行器、终态判分、归因分析、CLI |
 | `web/` | trace 回放与实验对照面板（W5） |
 | `docs/` | 产品设计与技术实现方案 |
-| `experiments/` | 版本化实验配置（`config.toml` / `calibration.toml` / `guard_ab_*.toml`）、冻结基线、按 `run_id` 留档的报告与结果行、`w3_guard_matrix.md` 因子汇总、`w3_robustness.md` 多种子稳健性检验、`w3_tool_retry_sweep.md` / `w3_json_recovery_sweep.md` 跨 seed A/B、`w3_ceiling.md` 可达上限分析 |
+| `experiments/` | 版本化实验配置（`config.toml` / `calibration.toml` / `guard_ab_*.toml`）、冻结基线、按 `run_id` 留档的报告与结果行、`w3_guard_matrix.md` 因子汇总、`w3_robustness.md` 多种子稳健性检验、`w3_tool_retry_sweep.md` / `w3_json_recovery_sweep.md` 跨 seed A/B、`w3_ceiling.md` 可达上限分析、`w3_resolution.md` 分辨率与效应掩蔽审计 |
 | `tests/` | 单元测试与回归用例 |
 | `traces/`, `results/` | 运行产物，自动创建、不入库 |
 
@@ -178,11 +178,28 @@ python -m eval.ceiling                                                  # 九格
 python -m eval.ceiling --from-jsonl                                      # 只读证据重渲染
 ```
 
-**W3 护栏阶段收口**：四类注入故障（`bad_json` / `bad_args` / `wrong_tool` / `duplicate_call`）已有四条护栏覆盖，组合达到当前任务集的可达上限，不再追加「又能涨 0.10」的护栏。路线表剩余的上下文压缩 / token 与步数预算在确定性模拟器上**没有可观测的测量输入**（`prompt_tokens` 恒 0、没有真实上下文窗口、`MAX_STEPS` 是 W1 固定常量），硬塞开关等于换测量仪器；它们要等 W4 接真实模型、构造有成本压力的任务集后才可测。下一步该做的是提高 `pass^k` 分辨率（扩任务集 / 提高 k / 把固有缺陷分层标注），以及验证 `[GUARD-REJECT]` 在真实模型下能否被读懂并改对。
+**W3 护栏阶段收口**：四类注入故障（`bad_json` / `bad_args` / `wrong_tool` / `duplicate_call`）已有四条护栏覆盖，组合达到当前任务集的可达上限，不再追加「又能涨 0.10」的护栏。路线表剩余的上下文压缩 / token 与步数预算在确定性模拟器上**没有可观测的测量输入**（`prompt_tokens` 恒 0、没有真实上下文窗口、`MAX_STEPS` 是 W1 固定常量），硬塞开关等于换测量仪器；它们要等 W4 接真实模型、构造有成本压力的任务集后才可测。下一步该做的是**新增独立任务**以提高 `pass^k` 分辨率，以及验证 `[GUARD-REJECT]` 在真实模型下能否被读懂并改对。注意：提高 k 不改变分辨率（它恒为 1/任务数），把固有缺陷从分母里剔除也只会让步进变粗；口径纠正与证据见下一节。
+
+## W3 测量仪器审计：分辨率与效应掩蔽
+
+护栏阶段收口后，先把尺子本身校准了一次。[w3_resolution.md](experiments/w3_resolution.md) 用三档 k（3 / 5 / 8）× 30 seed × 三格（`off` / 单开 `schema_validation` / 四条全开）回答三个问题。
+
+**分辨率恒为 1/N，与 k 无关**。`analyze.summarize` 里 `passk = passk_hits / task_count`，分子只能是 0..10 的整数，所以 `pass^k` 只能落在 11 个格点上、最小步进恒为 0.10。实测三档 k 的步进都是 0.10，`pass¹` 也完全相同（只取 trial=1）；k 是难度旋钮，不是分辨率旋钮。**既有多份报告里「扩大任务集或提高 k 能提高分辨率」的后半句是错的**：归档报告按实验记录纪律保留原文、不回溯改字（它们是当时跑批的证据），本文件与 [docs/tech-stack.md](docs/tech-stack.md) 是活文档，直接改并由守门测试钉死。
+
+**实际可用的只有 4 档**。10 条任务里 7 条在任何 seed、任何护栏组合下都 k 次全不过（脚本固有缺陷），真正可翻转的只有 3 条，动态范围 0.00~0.30。清单由证据自动推导、不硬编码任务 ID。
+
+**零效应要拆成两类，不能一刀切解释**。k=3 时 `off → schema` 有 26 个零效应 seed，其中 24 个是护栏在这个 seed 上根本没修好任何 trial，只有 2 个是「修好了 trial 却被 k 次全过门槛吞掉」；k 提到 8 时掩蔽升到 7 个。所以既不能把零效应一律读成「护栏没用」，也不能一律解释成「只是尺子太钝」。相对地，`off → all4` 修好 100 个 trial、翻转 47 个任务、零掩蔽、零回归，三档 k 的平均 `pass^k` 都是 0.3000——组合效应够大时，门槛不再吞掉任何东西。另外单开护栏有 17 次 trial 级 1→0 变差，但逐 seed Δ`pass^k` 没有负值，这是「中间指标不是结果代理」的又一个方向。
+
+```bash
+python -m eval.resolution                 # 三档 k × 30 seed × 三格
+python -m eval.resolution --from-jsonl     # 只读证据重渲染
+```
+
+本审计不引入新指标、不改判分口径、不修改任何既有留档；k=5 / k=8 只是诊断，**主指标仍是 k=3 的 `pass^k`**。它是描述性统计、不是显著性检验，全部来自确定性模拟器，不构成真实模型能力 / 成本 / 延迟结论。真正提高分辨率只能新增独立任务（新的版本化任务集、另开实验组），并把固有缺陷作为归因分层单独报告——不能悄悄改既有任务集，否则既有留档失去可比性。
 
 ## 开发路线
 
-> W1 全部、W2 全量、P0 实验记录体系、W2.5 校准，以及 W3 四条护栏、2×2 全因子、多种子稳健性检验与可达上限分析已落地（护栏阶段收口）；冻结基线见 [experiments/mvp_baseline.md](experiments/mvp_baseline.md)。
+> W1 全部、W2 全量、P0 实验记录体系、W2.5 校准，以及 W3 四条护栏、2×2 全因子、多种子稳健性检验、可达上限分析与分辨率审计已落地（护栏阶段收口）；冻结基线见 [experiments/mvp_baseline.md](experiments/mvp_baseline.md)。
 
 | 阶段 | 交付 |
 | --- | --- |
@@ -191,7 +208,7 @@ python -m eval.ceiling --from-jsonl                                      # 只�
 | P0 | 实验配置版本化、`run_id` 留档、冻结基线与报告 diff（已交付） |
 | W2 余项 | `ModelReply` 真实观测、条件话术、trace 首个偏离点归因与证据入库（已交付） |
 | W2.5 | `SeededBackend` 校准 `pass^k` 区分度，零成本、不接真实模型（已交付） |
-| W3 | 逐项修运行时，每组只改一个变量：`schema_validation` / `idempotency` 的 2×2 主效应 / 交互、30 个 seed 的稳健性检验、`tool_retry` 与 `json_recovery` 的跨 seed A/B，以及九格可达上限分析并收口（已交付）；上下文压缩 / 预算转到 W4 真实模型阶段 |
+| W3 | 逐项修运行时，每组只改一个变量：`schema_validation` / `idempotency` 的 2×2 主效应 / 交互、30 个 seed 的稳健性检验、`tool_retry` 与 `json_recovery` 的跨 seed A/B，以及九格可达上限分析并收口、`pass^k` 分辨率与效应掩蔽审计（已交付）；上下文压缩 / 预算转到 W4 真实模型阶段 |
 | W4 | 4–6 组单变量对照实验，出成功率 / 成本帕累托图 |
 | W5 | 服务化、并发、容器化、trace 回放、测试 |
 | W6 | 中文扩展任务集、结果表、复现文档 |
