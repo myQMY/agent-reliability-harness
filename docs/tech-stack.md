@@ -1,6 +1,6 @@
 # 技术实现方案：Agent 可靠性评测与运行时平台
 
-> 状态：选型已确认，MVP 已实现（W1 全部 + W2 判分 / trace）。本文只定技术实现口径，不修改 [MVP 产品设计](mvp-design.md) 已确认的功能范围与验收标准；不写任何未经验证的结果数字。
+> 状态：选型已确认，MVP 已实现（W1 全部 + W2 判分 / trace），P0 实验记录体系已落地。本文只定技术实现口径，不修改 [MVP 产品设计](mvp-design.md) 已确认的功能范围与验收标准；不写任何未经验证的结果数字。
 > 适用阶段：W1–W2（MVP），并给出 W3–W5 的依赖升级点。整体定位见 [README.md](../README.md)，协作规则见 [AGENTS.md](../AGENTS.md)。
 
 ## 1. 总体结论
@@ -32,6 +32,7 @@ Python 3.11+ 标准库为主，`sqlite3` 作领域库，JSONL 作任务 / trace 
 - 按用途使用：`sqlite3`（领域库）、`json`（数据契约与 trace）、`dataclasses` / `typing`（记录类型与 `Protocol`）、`argparse`（CLI）、`unittest`（测试）、`tomllib`（实验配置）、`pathlib`（路径）。
 - 依赖声明：仓库无 `requirements.txt`，也不需要。真实模型路径只用标准库 `urllib.request`，默认路径 `python -m eval.run` 在裸环境下可直接运行。
 - `.env` 只承载密钥与后端地址，不承载实验参数；实验参数必须版本化入库（见 §5）。
+- 实验配置已落地为 `experiments/config.toml`，由 `eval/config.py` 用 `tomllib` 读取；未知字段直接报错，配置里不允许出现「写了但没接上」的占位项（见 §5.1）。
 
 ## 4. 分层实现约定
 
@@ -74,6 +75,17 @@ Python 3.11+ 标准库为主，`sqlite3` 作领域库，JSONL 作任务 / trace 
 - 实验配置与结果表同目录版本化入库，保证每个数字都能在仓库里翻到出处。
 - 一致性测试断言同配置连跑两次，`traces/` 与 `results/` 产物逐字节相同。
 
+### 5.1 实验配置与留档（P0 已落地）
+
+W3 的单变量对照实验要求「每组的输入都能翻到出处」，因此先把记录体系做完，再加护栏：
+
+- `experiments/config.toml` 是一次实验的唯一事实来源；`--tasks` / `--k` / `--backend` 等 CLI 参数只覆盖对应字段，**最终生效配置**决定 `run_id`。
+- `run_id = <name>-<sha256(配置摘要)[:12]>`，摘要走 `sort_keys` 稳定序列化；不含时间戳、随机值、机器路径与输出目录。改任一字段必得新 `run_id`，同配置必得同一 `run_id`。
+- **冻结基线**：`experiments/mvp_baseline.md` 与 `experiments/baseline/result_rows.jsonl` 只读；`--report` 不再以基线文件为默认值，且指向冻结基线时直接拒绝，防止重跑一次就丢掉对照组。
+- 留档模式写 `experiments/runs/<run_id>/report.md` 与 `config.json`；报告内容只依赖结果行、配置与基线行，不含输出路径与时钟，因此同 `run_id` 的报告逐字节一致，并自带「与冻结基线对照」表。
+- 报告口径随 `backend` 分支。`OpenAIBackend` 当前尚未接入 usage 观测，`tokens` / `latency_ms` 仍为 0，报告如实标注为 W2 待办，不拿占位数字充当成本结论。
+- 「逐字节一致」的验收范围明确为 **ScriptedBackend**；真实模型路径不承诺结果可复现，只保证配置可追溯。
+
 ## 6. 依赖策略：按阶段引入，而非按需引入
 
 这是本项目和普通应用最关键的区别——**依赖引入时机与对照实验设计绑定**：
@@ -110,6 +122,7 @@ W4 若做框架对照，应作为**独立 backend / loop 实现**并列接入，
 | 阶段 | 技术变化 | 不变的部分 |
 | --- | --- | --- |
 | W2 | `OpenAIBackend` 已落地（离线单测覆盖），待接真实模型验证 | `Backend` 接口、grader、trace 格式 |
+| P0 | 实验配置版本化、`run_id` 留档、冻结基线与报告 diff（已交付） | `Backend` 接口、判分口径、trace 格式 |
 | W3 | 逐项加护栏：参数校验、幂等键、上下文压缩、预算；一次只改一个变量 | 判分与执行主链路 |
 | W4 | 多组单变量对照实验、结果表与帕累托图 | 任务集与判分口径 |
 | W5 | runner 并发化（IO 已收敛）、FastAPI + 读 JSONL 的静态回放页、容器化 | 循环与判分逻辑 |
@@ -120,6 +133,8 @@ Web 层选型到 W5 再定；届时的回放页是只读 JSONL 的展示层，�
 ## 10. 落地前置动作与开放项
 
 - **范围泄漏已清理**：`.env.example` 中 `EVAL_CONCURRENCY` / `MAX_TOKENS_PER_TASK` / `EVAL_DB_TEMPLATE` 已改为注释并标注 W3 / W5 生效；守门测试增加用例，防止这三个参数以生效配置形式回到 MVP。
+- **实验记录体系已落地（P0）**：配置版本化、`run_id` 留档、冻结基线保护、报告 diff 与随后端切换的口径说明均已实现，并由 `tests/test_experiment_config.py` 与守门测试覆盖。W3 起每组实验改一个配置字段即可，不需要再靠命令行人肉记忆。
 - **模型服务未定**：`OpenAIBackend` 目前按 OpenAI 兼容 `chat/completions` 实现，已用可注入 opener 做离线单测；若目标服务协议不同，需在 `runtime/model.py` 内加一层适配，`loop.py` 与 grader 不受影响。
+- **真实观测未接入**：`OpenAIBackend` 丢弃了响应的 `usage`，且 span 的 `tokens` / `latency_ms` 由 `guard` 常量写死，因此 W2 需把 `Backend.generate` 改为返回结构化结果（文本 + token + 耗时）；真实耗时只进 span 不进判分，且明确排除出「逐字节一致」的断言范围。
 - **零第三方依赖**本次按硬约束执行；若后续决定放宽，需同步修改守门测试与设计原则，而不是静默引入。
 - 本文不调整产品范围；范围变更走 `docs/mvp-design.md` 并同步守门测试。

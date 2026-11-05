@@ -2,7 +2,7 @@
 
 面向多轮工具调用 Agent 的可靠性评测与运行时平台。
 
-> 状态：MVP 已跑通（W1 全部 + W2 判分 / trace）。本文件不写任何未经验证的结论；所有指标以 `experiments/` 下可复现的结果为准。
+> 状态：MVP 已跑通（W1 全部 + W2 判分 / trace），P0 实验记录体系已落地。本文件不写任何未经验证的结论；所有指标以 `experiments/` 下可复现的结果为准。
 
 ## 为什么做这个
 
@@ -27,7 +27,7 @@ Agent demo 和能稳定运行的 Agent 之间，差的通常不是模型能力�
 | `eval/` | 用户模拟器、批量执行器、终态判分、归因分析、CLI |
 | `web/` | trace 回放与实验对照面板（W5） |
 | `docs/` | 产品设计与技术实现方案 |
-| `experiments/` | 版本化的实验配置与结果报表 |
+| `experiments/` | 版本化实验配置 `config.toml`、冻结基线、按 `run_id` 留档的报告与配置快照 |
 | `tests/` | 单元测试与回归用例 |
 | `traces/`, `results/` | 运行产物，自动创建、不入库 |
 
@@ -54,21 +54,27 @@ python -m eval.run --tasks tasks/mvp_10.jsonl --k 3
 
 - `results/result_rows.jsonl`：结果行（不入库）
 - `traces/<trial_id>.jsonl`：每步一个 span 的全链路 trace（不入库）
-- `experiments/mvp_baseline.md`：入库的 Markdown 结果表
+- `experiments/runs/<run_id>/report.md` + `config.json`：本次实验的报告与生效配置快照（入库）
 
-默认使用 `ScriptedBackend`（确定性脚本、零成本、零密钥）。切真实模型时复制 `.env.example` 为 `.env` 填入 `LLM_*`，再执行 `python -m eval.run --backend openai --k 3`；该路径走标准库 `urllib`，同样无需安装 SDK。
+**实验配置以 `experiments/config.toml` 为唯一事实来源**：后端、k、任务集、两条护栏参数、对照基线都在这里；CLI 显式参数只覆盖对应字段。最终生效配置经确定性摘要生成 `run_id`，同配置必得同一 `run_id`，改任一字段就落到新的实验目录，因此做单变量对照实验时每组的输入都可追溯。
+
+`experiments/mvp_baseline.md` 与 `experiments/baseline/result_rows.jsonl` 是 **W1 冻结基线**，只读参照，任何运行都不会覆盖；每次报告自动带「与冻结基线对照」表。显式 `--report` 视为临时报告，且指向冻结基线时会被直接拒绝。
+
+默认使用 `ScriptedBackend`（确定性脚本、零成本、零密钥）。切真实模型时复制 `.env.example` 为 `.env` 填入 `LLM_*`，再执行 `python -m eval.run --backend openai --k 3`；该路径走标准库 `urllib`，同样无需安装 SDK。注意当前 `OpenAIBackend` 尚未接入 usage 观测，`tokens` / `latency_ms` 仍为 0（W2 待办），报告口径会如实标注。
 
 任务格式与脚本说明见 [tasks/README.md](tasks/README.md)，实现口径见 [docs/tech-stack.md](docs/tech-stack.md)。
 
 ## 开发路线
 
-> W1 全部与 W2 的判分 / trace 已随 MVP 落地，基线结果见 [experiments/mvp_baseline.md](experiments/mvp_baseline.md)。
+> W1 全部、W2 的判分 / trace、P0 实验记录体系已落地；冻结基线见 [experiments/mvp_baseline.md](experiments/mvp_baseline.md)。
 
 | 阶段 | 交付 |
 | --- | --- |
 | W1 | 领域库 + 最小 Agent + 10 条任务，拿到基线（已交付） |
 | W2 | trace + 终态判分 + 批量执行，出失败归因分布（已交付） |
-| W3 | 按归因逐项修运行时：校验、预算、压缩、幂等、审批 |
+| P0 | 实验配置版本化、`run_id` 留档、冻结基线与报告 diff（已交付） |
+| W2 余项 | 接真实模型、usage 观测、模拟器条件话术、归因从 trace 判定 |
+| W3 | 按归因逐项修运行时：校验、预算、压缩、幂等（每组只改一个变量） |
 | W4 | 4–6 组单变量对照实验，出成功率 / 成本帕累托图 |
 | W5 | 服务化、并发、容器化、trace 回放、测试 |
 | W6 | 中文扩展任务集、结果表、复现文档 |

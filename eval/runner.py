@@ -28,6 +28,9 @@ class RunConfig:
     backend: BackendConfig = field(default_factory=BackendConfig)
     results_dir: Path = Path("results")
     traces_dir: Path = Path("traces")
+    # 护栏值来自实验配置（eval/config.py）；默认值与冻结基线一致
+    max_steps: int = guard.MAX_STEPS
+    max_json_retries: int = guard.MAX_JSON_RETRIES
 
 
 def load_tasks(path: Path) -> list[Task]:
@@ -48,7 +51,7 @@ def _run_trial(
     conn = db.reset(template)
     backend = build_backend(config.backend, task.get("script", ()))
     counter = loop.StepCounter()
-    budget = guard.StepBudget()
+    budget = guard.StepBudget(max_steps=config.max_steps)
     simulator = RuleUserSimulator(task["user_utterances"])
 
     messages: list[dict[str, str]] = []
@@ -71,6 +74,7 @@ def _run_trial(
             trial_id=trial_id,
             counter=counter,
             budget=budget,
+            max_json_retries=config.max_json_retries,
         )
         spans.extend(result.spans)
         errors.extend(result.errors)

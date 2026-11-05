@@ -186,5 +186,45 @@ class TestTechStackDoc(unittest.TestCase):
                 self.assertIn(compact(phrase), text, f"技术方案缺少排除项：{phrase}")
 
 
+class TestExperimentRecords(unittest.TestCase):
+    """P0 实验记录体系是 W3 对照实验的地基：配置、冻结基线、留档约定不得回潮。"""
+
+    def test_required_record_files_exist(self):
+        for rel_path in (
+            "experiments/config.toml",
+            "experiments/baseline/result_rows.jsonl",
+            "experiments/mvp_baseline.md",
+            "eval/config.py",
+        ):
+            with self.subTest(file=rel_path):
+                self.assertTrue((ROOT / rel_path).is_file(), f"缺少 {rel_path}")
+
+    def test_cli_never_writes_frozen_baseline_by_default(self):
+        source = read("eval/run.py")
+        self.assertIn("FROZEN_BASELINE", source, "CLI 必须显式守住冻结基线")
+        self.assertNotIn(
+            'default=Path("experiments/mvp_baseline.md")',
+            source,
+            "--report 默认值不得指回冻结基线，否则重跑会覆盖对照组",
+        )
+
+    def test_frozen_baseline_is_not_ignored(self):
+        ignore = read(".gitignore")
+        self.assertNotIn("experiments/baseline/", ignore)
+        self.assertNotIn("experiments/config.toml", ignore)
+
+    def test_readme_documents_run_id_and_freeze(self):
+        text = compact(read("README.md"))
+        for phrase in ("run_id", "冻结基线", "experiments/config.toml"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(compact(phrase), text, f"README 缺少 {phrase}")
+
+    def test_tech_stack_documents_archive_mode(self):
+        text = compact(read("docs/tech-stack.md"))
+        for phrase in ("run_id", "冻结基线", "config.toml"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(compact(phrase), text, f"技术方案缺少 {phrase}")
+
+
 if __name__ == "__main__":
     unittest.main()

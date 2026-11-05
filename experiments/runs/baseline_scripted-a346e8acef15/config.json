@@ -1,0 +1,1 @@
+{"config":{"backend":"scripted","compare":"experiments/baseline/result_rows.jsonl","k":3,"max_json_retries":2,"max_steps":12,"name":"baseline_scripted","tasks":"tasks/mvp_10.jsonl"},"run_id":"baseline_scripted-a346e8acef15"}

@@ -89,8 +89,13 @@ def run_turn(
     trial_id: str,
     counter: StepCounter,
     budget: guard.StepBudget,
+    max_json_retries: int = guard.MAX_JSON_RETRIES,
 ) -> TurnResult:
-    """跑一轮对话，直到模型给出 final 或触发两条护栏之一。"""
+    """跑一轮对话，直到模型给出 final 或触发两条护栏之一。
+
+    max_json_retries 由实验配置注入；不传时沿用 MVP 默认值，
+    保证既有验收命令与冻结基线的行为完全不变。
+    """
     result = TurnResult()
     consecutive_format_errors = 0
     while True:
@@ -116,7 +121,7 @@ def run_turn(
                     observation=f"{RETRY_HINT} ({reason})",
                 )
             )
-            if consecutive_format_errors > guard.MAX_JSON_RETRIES:
+            if consecutive_format_errors > max_json_retries:
                 result.termination = TERMINATION_JSON_FAILURE
                 return result
             continue
