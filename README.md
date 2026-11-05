@@ -2,7 +2,7 @@
 
 面向多轮工具调用 Agent 的可靠性评测与运行时平台。
 
-> 状态：W1 全部、W2 全量（判分 / trace / 真实模型观测 / 条件话术 / trace 归因）、P0 实验记录体系、W2.5 测量链路校准，以及 W3 两条护栏（`schema_validation` / `idempotency`）构成的 2×2 全因子实验已落地。本文件不写任何未经验证的结论；所有指标以 `experiments/` 下可复现的结果为准。
+> 状态：W1 全部、W2 全量（判分 / trace / 真实模型观测 / 条件话术 / trace 归因）、P0 实验记录体系、W2.5 测量链路校准，以及 W3 两条护栏（`schema_validation` / `idempotency`）的 2×2 全因子实验与多种子稳健性检验已落地。本文件不写任何未经验证的结论；所有指标以 `experiments/` 下可复现的结果为准。
 
 ## 为什么做这个
 
@@ -27,7 +27,7 @@ Agent demo 和能稳定运行的 Agent 之间，差的通常不是模型能力�
 | `eval/` | 用户模拟器、批量执行器、终态判分、归因分析、CLI |
 | `web/` | trace 回放与实验对照面板（W5） |
 | `docs/` | 产品设计与技术实现方案 |
-| `experiments/` | 版本化实验配置（`config.toml` / `calibration.toml` / `guard_ab_*.toml`）、冻结基线、按 `run_id` 留档的报告与结果行、`w3_guard_matrix.md` 因子汇总 |
+| `experiments/` | 版本化实验配置（`config.toml` / `calibration.toml` / `guard_ab_*.toml`）、冻结基线、按 `run_id` 留档的报告与结果行、`w3_guard_matrix.md` 因子汇总、`w3_robustness.md` 多种子稳健性检验 |
 | `tests/` | 单元测试与回归用例 |
 | `traces/`, `results/` | 运行产物，自动创建、不入库 |
 
@@ -116,9 +116,26 @@ python -m eval.guard_matrix                                  # 汇总 2×2 主�
 
 **读表时最容易犯的错**：`invalid_calls` 不是成功率的代理指标。参数护栏拦下坏参数会让它下降，但任务仍可能失败（归因从 `bad_args` 变成 `unknown`）；幂等护栏拦下的是工具层**不报错**、只是把终态写坏的重复写，实测 `invalid_calls` 从 7 到 7 一点没动，pass³ 却翻倍。两个方向都成立，所以论效果只能看 `pass^k`。模拟器没有语言理解能力，这组数字只说明 harness 机制可测量，**不构成真实模型能力、成本或延迟结论**；幂等键也只在单 trial 内存去重，不承诺跨进程幂等。
 
+## W3 稳健性：单 seed 结论不可外推
+
+上面的 2×2 全因子报告只跑在 `seed=11` 上：10 条任务、k=3，`pass^k` 的分辨率是 0.10，一个任务翻转就是 ±0.10。「两条护栏主效应各 +0.10」很容易被读成普遍规律。所以在继续加第三条护栏之前，先把同一套四格配置在一组版本化的整数 seed 上重跑，看效应符号能不能重复。
+
+```bash
+python -m eval.robustness                 # 30 个 seed × 四格，写证据 + 报告
+python -m eval.robustness --from-jsonl    # 只读证据重渲染，不重跑评测
+```
+
+`eval/robustness.py` 复用 `guard_matrix.effects_of` 保证口径一致；seed 集硬编码版本化、不读时钟、不做随机抽样，跑批只写临时目录，仓库只多出 `w3_robustness.jsonl`（逐 seed 逐格的完整指标）与 [experiments/w3_robustness.md](experiments/w3_robustness.md)。既有四份配置的 `run_id`、留档报告、`w3_guard_matrix.md` 与冻结基线**一字节未动**——这一轮没有新增护栏，也没有改判分口径。
+
+**多种子实测结论**：`seed=11` 是**偏乐观**的样本。30 个 seed 里 `schema_validation` 只有 5 个正效应、25 个零效应（均值 +0.015），`idempotency` 有 27 个正效应、3 个零效应（均值 +0.095），交互只有 1 个非零（seed=9001）；**没有任何 seed 出现负效应**，两条护栏在本任务集、本模拟器下都没让 `pass^k` 变差。机制上，`schema_validation` 把坏参数拦在执行前，`invalid_calls` 下降但归因变成 `unknown`、任务仍失败；`pass^k` 又要求 k 次全过，条件苛刻，因此多数 seed 下不翻转任务。`idempotency` 直接减少 `policy_violation`，修的是终态，所以稳定得多。
+
+**口径**：这是描述性统计，**不是显著性检验**，没有置信区间与 p 值；seed 是人为选定的整数、不是随机抽样，「30 个里 X 个为正」不能当概率估计，更不能外推到真实模型；全部数字来自确定性模拟器，不构成能力 / 成本 / 延迟结论。因此既有报告里的 +0.10 / +0.10 只描述那一次随机流，**不能外推**为普遍效应。
+
+后续每条护栏（上下文压缩、token / 步数预算、退避）仍按「一组一条、单变量 A/B」推进，但每组都应给出同一 seed 集上的符号分布；只报一个 seed 的 A/B 不算可复现结论。
+
 ## 开发路线
 
-> W1 全部、W2 全量、P0 实验记录体系、W2.5 校准，以及 W3 两条护栏的 2×2 全因子实验已落地；冻结基线见 [experiments/mvp_baseline.md](experiments/mvp_baseline.md)。
+> W1 全部、W2 全量、P0 实验记录体系、W2.5 校准，以及 W3 两条护栏的 2×2 全因子实验与多种子稳健性检验已落地；冻结基线见 [experiments/mvp_baseline.md](experiments/mvp_baseline.md)。
 
 | 阶段 | 交付 |
 | --- | --- |
@@ -127,7 +144,7 @@ python -m eval.guard_matrix                                  # 汇总 2×2 主�
 | P0 | 实验配置版本化、`run_id` 留档、冻结基线与报告 diff（已交付） |
 | W2 余项 | `ModelReply` 真实观测、条件话术、trace 首个偏离点归因与证据入库（已交付） |
 | W2.5 | `SeededBackend` 校准 `pass^k` 区分度，零成本、不接真实模型（已交付） |
-| W3 | 逐项修运行时，每组只改一个变量：参数 `schema_validation`、幂等键 `idempotency` 及其 2×2 主效应 / 交互（已交付）；预算、压缩、退避待续 |
+| W3 | 逐项修运行时，每组只改一个变量：参数 `schema_validation`、幂等键 `idempotency` 及其 2×2 主效应 / 交互、30 个 seed 的稳健性检验（已交付）；预算、压缩、退避待续，每组须附多 seed 符号分布 |
 | W4 | 4–6 组单变量对照实验，出成功率 / 成本帕累托图 |
 | W5 | 服务化、并发、容器化、trace 回放、测试 |
 | W6 | 中文扩展任务集、结果表、复现文档 |

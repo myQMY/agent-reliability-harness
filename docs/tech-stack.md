@@ -1,6 +1,6 @@
 # 技术实现方案：Agent 可靠性评测与运行时平台
 
-> 状态：选型已确认，W1 全部、W2 全量（判分 / trace / 真实模型观测 / 条件话术 / trace 归因）、P0 实验记录体系、W2.5 测量链路校准，以及 W3 两条护栏（`schema_validation` / `idempotency`）的 2×2 全因子实验已落地。本文只定技术实现口径，不修改 [MVP 产品设计](mvp-design.md) 已确认的功能范围与验收标准；不写任何未经验证的结果数字。
+> 状态：选型已确认，W1 全部、W2 全量（判分 / trace / 真实模型观测 / 条件话术 / trace 归因）、P0 实验记录体系、W2.5 测量链路校准，以及 W3 两条护栏（`schema_validation` / `idempotency`）的 2×2 全因子实验与多种子稳健性检验已落地。本文只定技术实现口径，不修改 [MVP 产品设计](mvp-design.md) 已确认的功能范围与验收标准；不写任何未经验证的结果数字。
 > 适用阶段：W1–W3（已落地），并给出 W4–W6 的依赖升级点。整体定位见 [README.md](../README.md)，协作规则见 [AGENTS.md](../AGENTS.md)。
 
 ## 1. 总体结论
@@ -66,6 +66,7 @@ Python 3.11+ 标准库为主，`sqlite3` 作领域库，JSONL 作任务 / trace 
 - `trace.py` 每步一个 span 追加写 JSONL；`analyze.py` 汇总 pass¹ / pass^k、平均步数、失败类型分布、token 与延迟观测。
 - 结果表用字符串生成 Markdown 写入 `experiments/`，保持结果可 `git diff`、可追溯；不引入 pandas / Jupyter / matplotlib。
 - `guard_matrix.py` 是 W3 的**只读汇总器**：`build_matrix()` 读四组留档的 `result_rows.jsonl` 与生效配置，`render_matrix()` 生成 `experiments/w3_guard_matrix.md` 的 2×2 因子表、主效应（该因子开 / 关两组均值之差）与交互（双重差分）。四条边里 `off → schema` 与 `off → idem` 才是单变量对照，`both` 格一次改两项，只用于算交互。它不重跑评测、不修改留档、不读时钟，同批留档重跑逐字节一致；缺任一格直接报错而不静默补零。浮点残差只做 `|v| < 1e-9 → 0` 的噪声归零，不做任何四舍五入或结果修饰。
+- `eval/robustness.py` 是 W3 的**多种子稳健性检验**：矩阵报告只在 `seed=11`、10 条任务、k=3 上跑过一次，`pass^k` 分辨率 0.10，单 seed 的「两条主效应各 +0.10」极易被读成普遍规律。它把完全相同的四格配置在一组硬编码版本化的整数 seed 上重跑，报告效应的正 / 零 / 负符号分布，生成 `experiments/w3_robustness.jsonl`（逐 seed 逐格证据）与 `experiments/w3_robustness.md`。效应公式直接 `from eval.guard_matrix import effects_of`，口径与矩阵报告逐字一致；不读时钟、不读环境变量、不做随机抽样、不引第三方依赖，跑批只写临时目录（各格共用，trace 文件名由 `trial_id` 决定，最多 31 个文件自动清理）。`--from-jsonl` 支持只读重渲染，同命令两次产物逐字节一致。它是描述性统计，**不是显著性检验**，不给置信区间 / p 值；seed 是人为选定的整数而非随机样本，符号分布不能当概率估计。
 - `traces/`、`results/` 为运行产物，自动创建、不入库。
 
 ## 5. 确定性与可复现（先于编码定下来的硬约束）
@@ -129,6 +130,7 @@ W4 若做框架对照，应作为**独立 backend / loop 实现**并列接入，
 - W2.5 另补 `tests/test_seeded_backend.py`、`test_seeded_calibration.py`：RNG 确定性、四类故障可构造、修复协议、零故障率逐字等价脚本后端、耗尽收敛、默认 `run_id` 字面量与快照字节、seeded 连跑两次逐字节一致、**k=3 跑批 `pass^k < pass¹`**、跨后端对照警告。注意默认 scripted 结果行不能断言「与冻结基线逐字节一致」——冻结基线是 W1 的 9 字段 schema，W2 起结果行多了 `reasons` / `first_divergence`；可守门的是所有测量指标逐项一致。
 - W3 另补 `tests/test_schema_guard.py`：护栏规则正反例与单变量边界（未知工具放行）、工具层契约不变、拦截发生在 `tools.call` 之前、guard span 不进 grader、拦截次数上限收敛、`_pending_correct` 只活一次、**两份 A/B 配置的测量输入逐字段相同**、两个既有 `run_id` 与默认快照不变、OFF / ON 两组连跑两次逐字节一致、**ON 组 `pass^k` 严格提升且 `bad_args` 归零**、脚本固有缺陷不被静默修好、A/B 报告版式与「`invalid_calls` 下降不等于提升」的口径提醒。
 - W3 第二条护栏另补 `tests/test_idempotency_guard.py`：幂等键确定性与参数顺序无关、写工具清单单一事实来源、读工具 / 失败调用 / 未知工具不拦、`GuardState` 跨 turn 共享、拦截预算收敛、真实跑批里 guard span 只针对写工具、**四份配置构成 2×2 且测量输入逐字段相同**、既有 4 个 `run_id` 与 3 份归档报告逐字节不变、**`idempotency` 让 `pass^k` 提升而 `invalid_calls` 一点不变**、T03 重复写被修好而 T08 缺参数没被静默修好、矩阵主效应 / 交互的纯计算与留档报告逐字节一致、缺任一格报错。守门类 `TestW3FactorialContract` 另钉死源码锚点：幂等键必须走 `hashlib.sha256` 且不含时间 / UUID / 全局随机，矩阵模块不得读时钟。
+- W3 稳健性检验另补 `tests/test_robustness.py`：效应公式与 `effects_of` 同源、缺格不静默补零、符号分布纯计算、证据 / 报告与代码逐字节一致、**seed 集硬编码且顺序固定**（防止换 seed 挑结论）、**30 个 seed 的实测分布与 `seed=11` 的偏乐观取值被钉死**、无任何负效应且仅 seed=9001 交互非零、既有 4 个 `run_id` 与矩阵报告不变、CLI 连跑两次与 `--from-jsonl` 逐字节一致、模块不读时钟 / 不用全局随机 / 只导入标准库与本地模块、文档口径守门。
 - 每次改动按 `AGENTS.md`：改动 → 补 / 更新测试 → 全部验证通过 → 一个对应 commit → 交付。
 
 ## 9. 演进路线（核心层不动）
@@ -138,7 +140,7 @@ W4 若做框架对照，应作为**独立 backend / loop 实现**并列接入，
 | W2 | `ModelReply` 真实观测、条件话术、trace 首个偏离点归因与证据入库（已落地，离线单测覆盖）；真实模型服务待选型验证 | 判分口径、trace 的 8 字段、冻结基线的 pass 数字与失败分布 |
 | P0 | 实验配置版本化、`run_id` 留档、冻结基线与报告 diff（已交付） | `Backend` 接口、判分口径、trace 格式 |
 | W2.5 | `SeededBackend` 校准 `pass^k` 区分度：零成本、零依赖、确定性伪随机、预留护栏拒绝协议（已交付） | 默认 `run_id`、默认配置快照、冻结基线三件、默认 scripted 的全部测量指标 |
-| W3 | 逐项加护栏、一次只改一个变量：`schema_validation` 与 `idempotency` 及其 2×2 全因子主效应 / 交互报告（已交付）；上下文压缩 / 预算 / 退避待续 | 判分口径、trace 的 8 字段、冻结基线三件、既有 4 个 `run_id` / 快照、既有归档报告 |
+| W3 | 逐项加护栏、一次只改一个变量：`schema_validation` 与 `idempotency` 及其 2×2 全因子主效应 / 交互报告、30 个 seed 的多种子稳健性检验（已交付）；上下文压缩 / 预算 / 退避待续，每组须附多 seed 符号分布 | 判分口径、trace 的 8 字段、冻结基线三件、既有 4 个 `run_id` / 快照、既有归档报告与矩阵报告 |
 | W4 | 多组单变量对照实验、结果表与帕累托图 | 任务集与判分口径 |
 | W5 | runner 并发化（IO 已收敛）、FastAPI + 读 JSONL 的静态回放页、容器化 | 循环与判分逻辑 |
 | W6 | 中文扩展任务集与复现文档 | 上述全部 |
@@ -151,6 +153,7 @@ Web 层选型到 W5 再定；届时的回放页是只读 JSONL 的展示层，�
 - **实验记录体系已落地（P0）**：配置版本化、`run_id` 留档、冻结基线保护、报告 diff 与随后端切换的口径说明均已实现，并由 `tests/test_experiment_config.py` 与守门测试覆盖。W3 起每组实验改一个配置字段即可，不需要再靠命令行人肉记忆。
 - **模型服务未定**：`OpenAIBackend` 目前按 OpenAI 兼容 `chat/completions` 实现，已用可注入 opener 做离线单测；若目标服务协议不同，需在 `runtime/model.py` 内加一层适配，`loop.py` 与 grader 不受影响。W2.5 的 `SeededBackend` 只是零成本校准器，不能替代真实模型；`pass^k` 的「偶尔成功」在真实模型下的表现仍待 W2 接服务后验证。
 - **W3 两条护栏与 2×2 全因子已落地**：`schema_validation` 与 `idempotency` 都由 `[guards].enabled` 驱动，`loop.py` 在工具执行前拦截、`GUARD_REJECT_PREFIX` 触发后端重发干净动作；四份同后端同 seed 的配置构成 2×2，`guard_matrix.py` 只读留档算主效应与交互。单变量结论只能取 `off → schema` 与 `off → idem` 两条边；`both` 格一次改两项，仅用于算交互。跨后端数字、`invalid_calls` 的升降或持平都不构成因果证据，**论效果只看 `pass^k`**。交互为 0 也只描述本 seed / 本任务集下的可加性，不做显著性推断。后续每组仍须在同后端下只改一个变量；剩余护栏（上下文压缩、token / 步数预算、退避）各自独立成组，不要合并提交。
+- **多种子稳健性检验已落地，且证伪了「两条护栏各 +0.10」的普遍化解读**：`eval/robustness.py` 在 30 个版本化 seed 上重跑同一套四格，`seed=11` 是**偏乐观**样本——`schema_validation` 只有 5 个 seed 正效应、25 个零效应（均值 +0.015），`idempotency` 27 个正效应、3 个零效应（均值 +0.095），交互仅 seed=9001 非零；**没有任何 seed 出现负效应**。机制上参数护栏只是把 `bad_args` 变成 `unknown`、任务仍失败，`pass^k` 要求 k 次全过，条件苛刻；幂等护栏直接减少 `policy_violation`，修的是终态。这是描述性统计、**不是显著性检验**，seed 非随机抽样，符号分布不能当概率估计，更不能外推到真实模型。既有矩阵报告与全部留档一字节未动，结论修正只写进新报告与 README。**这一步必须排在第三条护栏之前**：单 seed 结论尚未站稳时继续挑「又能涨 0.10」的护栏，等于放大选择性报告；后续每条护栏（上下文压缩、token / 步数预算、退避）仍各自独立成组，但须附同一 seed 集上的符号分布，只报单 seed 的 A/B 不算可复现结论。
 - **开放项：护栏拒绝协议只在模拟器里验证过**。`SeededBackend` 靠 `_pending_correct` 在看到 `[GUARD-REJECT]` 后重发干净动作，它没有语言理解能力；真实模型能否读懂拒绝消息并改对，必须等接 `OpenAIBackend` 后另开实验验证，不能拿 W3 的数字外推。
 - **真实观测已接入（W2 余项）**：`Backend.generate` 返回 `ModelReply`，`OpenAIBackend` 读 `usage` 并计时；观测只挂 assistant span、只汇总进结果行，不参与判分。脚本后端恒为零值，逐字节一致仍成立；真实模型路径明确排除出该验收项。
 - **归因与话术已接入（W2 余项）**：`grader` 从 trace 首个偏离点判定，把 `reasons` / `first_divergence` 写进结果行；`user_sim` 支持可选 `utterance_rules`。两项升级都保证默认跑批的 pass 数字与 6 类失败分布和冻结基线逐项一致，由 `tests/test_attribution.py` 守门——**测量能力升级不得偷偷改变测量结果**。
