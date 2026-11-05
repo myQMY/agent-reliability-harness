@@ -4,6 +4,11 @@
 配置里的每个字段都必须真实生效，不允许「写了但没接上」的占位项；
 run_id 由配置摘要确定性生成，不含时间戳 / 随机值 / 机器路径，
 保证「同配置 → 同 run_id → 同报告」，也保证不同配置落到不同目录。
+
+_seed 兼容约定（W2.5）：seed / fault_per_mille 只对 SeededBackend 生效。
+为避免给默认 scripted 配置增加字段就改变 W1 冻结留档的 run_id，
+fingerprint 与 config_snapshot 统一走 _core()：非 seeded 后端下
+摘要只含原有 7 个字段，逐字节与 W1 一致；只有 seeded 才并入这两个字段。
 """
 from __future__ import annotations
 
@@ -20,7 +25,19 @@ DEFAULT_CONFIG_PATH = REPO_ROOT / "experiments" / "config.toml"
 _SECTION_FIELDS: dict[str, set[str]] = {
     "experiment": {"name", "tasks", "k", "backend", "compare"},
     "guards": {"max_steps", "max_json_retries"},
+    "seeded": {"seed", "fault_per_mille"},
 }
+
+# W1 冻结基线配置摘要的 7 个原始字段；任何情况下都保持原样
+_CORE_FIELDS = (
+    "name",
+    "tasks",
+    "k",
+    "backend",
+    "max_steps",
+    "max_json_retries",
+    "compare",
+)
 
 
 @dataclass(frozen=True)
@@ -34,6 +51,9 @@ class ExperimentConfig:
     max_steps: int = 12
     max_json_retries: int = 2
     compare: str = "experiments/baseline/result_rows.jsonl"
+    # 仅 backend == "seeded" 时生效；scripted / openai 下忽略
+    seed: int = 0
+    fault_per_mille: int = 0
 
     def validate(self) -> None:
         if not self.name or any(
@@ -42,12 +62,16 @@ class ExperimentConfig:
             raise ValueError("experiment.name 只能含字母、数字、- 或 _（用作目录名）")
         if self.k < 1:
             raise ValueError("experiment.k 必须 >= 1")
-        if self.backend not in ("scripted", "openai"):
-            raise ValueError("experiment.backend 只能是 scripted 或 openai")
+        if self.backend not in ("scripted", "openai", "seeded"):
+            raise ValueError("experiment.backend 只能是 scripted / openai / seeded")
         if self.max_steps < 1:
             raise ValueError("guards.max_steps 必须 >= 1")
         if self.max_json_retries < 0:
             raise ValueError("guards.max_json_retries 必须 >= 0")
+        if self.seed < 0:
+            raise ValueError("[seeded].seed 必须 >= 0")
+        if not 0 <= self.fault_per_mille <= 1000:
+            raise ValueError("[seeded].fault_per_mille 必须落在 0..1000")
         if not self.tasks:
             raise ValueError("tasks 不得为空（compare 允许留空以关闭对照）")
 
@@ -71,6 +95,7 @@ def load_config(path: Path | None = None) -> ExperimentConfig:
 
     experiment = raw.get("experiment", {})
     guards = raw.get("guards", {})
+    seeded = raw.get("seeded", {})
     config = ExperimentConfig(
         name=experiment.get("name", _DEFAULTS.name),
         tasks=experiment.get("tasks", _DEFAULTS.tasks),
@@ -80,6 +105,10 @@ def load_config(path: Path | None = None) -> ExperimentConfig:
         max_steps=guards.get("max_steps", _DEFAULTS.max_steps),
         max_json_retries=guards.get(
             "max_json_retries", _DEFAULTS.max_json_retries
+        ),
+        seed=seeded.get("seed", _DEFAULTS.seed),
+        fault_per_mille=seeded.get(
+            "fault_per_mille", _DEFAULTS.fault_per_mille
         ),
     )
     config.validate()
@@ -94,9 +123,24 @@ def with_overrides(config: ExperimentConfig, **changes: Any) -> ExperimentConfig
     return result
 
 
+def _core(config: ExperimentConfig) -> dict[str, Any]:
+    """进入 run_id 摘要与 config.json 快照的生效配置。
+
+    非 seeded 后端下 seed / fault_per_mille 不生效，因此不入摘要——
+    这让默认 scripted 配置的摘要逐字节等于 W1 冻结留档的那一份。
+    """
+    payload: dict[str, Any] = {
+        field: getattr(config, field) for field in _CORE_FIELDS
+    }
+    if config.backend == "seeded":
+        payload["seed"] = config.seed
+        payload["fault_per_mille"] = config.fault_per_mille
+    return payload
+
+
 def fingerprint(config: ExperimentConfig) -> str:
     payload = json.dumps(
-        asdict(config),
+        _core(config),
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -120,4 +164,4 @@ def resolve_input(path_str: str) -> Path:
 
 def config_snapshot(config: ExperimentConfig, rid: str) -> dict[str, Any]:
     """写入 run 目录的生效配置证据，与报告同目录版本化入库。"""
-    return {"run_id": rid, "config": asdict(config)}
+    return {"run_id": rid, "config": _core(config)}

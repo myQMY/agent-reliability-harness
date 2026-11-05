@@ -11,6 +11,7 @@ from runtime.model import (
     BackendConfig,
     OpenAIBackend,
     ScriptedBackend,
+    SeededBackend,
     build_backend,
     config_from_env,
 )
@@ -144,8 +145,12 @@ class TestBackends(unittest.TestCase):
             name="openai", base_url="http://x/v1", api_key="k", model="m"
         )
         self.assertIsInstance(build_backend(config, []), OpenAIBackend)
+        seeded = BackendConfig(name="seeded", seed=11, fault_per_mille=60)
+        self.assertIsInstance(build_backend(seeded, []), SeededBackend)
         with self.assertRaises(ValueError):
             build_backend(BackendConfig(name="openai"), [])
+        with self.assertRaises(ValueError):
+            build_backend(BackendConfig(name="unknown"), [])
 
     def test_config_from_env(self):
         config = config_from_env(

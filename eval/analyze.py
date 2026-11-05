@@ -86,6 +86,18 @@ def _caveats(config: ExperimentConfig) -> list[str]:
             "- `tokens` / `latency_ms` 恒为 0：脚本后端不产生真实模型调用，"
             "这是保持产物确定性的零值，**不是成本数据**，不能据此下成本或延迟结论。",
         ] + common_tail
+    if config.backend == "seeded":
+        return common_head + [
+            "- SeededBackend 是**确定性伪随机模拟器**：RNG 由 `(seed, task_id, trial, cursor)` "
+            "经 SHA256 派生，不使用时间、UUID 或全局随机源，因此同配置连跑两次仍逐字节一致。",
+            "- 不同 trial 的 RNG 流互相独立，所以同一任务 k 次结果可能不同；"
+            "**pass^k 在本后端下首次具备区分度**，可用于校准「偶尔成功」的测量链路。",
+            "- **它没有语言理解能力**：故障是按固定规则人为注入的噪声（坏 JSON / 错参数 / "
+            "错工具 / 重复写），任务脚本里固有的缺陷原样保留。本表数字只校准测量链路，"
+            "**不构成任何模型能力、成本或延迟结论**，也不是 W3 护栏的对照结果。",
+            "- `tokens` / `latency_ms` 恒为 0：模拟器不产生真实模型调用，"
+            "这是保持产物确定性的零值，**不是成本数据**。",
+        ] + common_tail
     return common_head + [
         "- OpenAIBackend 调用真实模型，同一任务 k 次结果可能不同；"
         "pass^k 此时才真正用于暴露「偶尔成功」。",
@@ -97,7 +109,10 @@ def _caveats(config: ExperimentConfig) -> list[str]:
 
 
 def _comparison_lines(
-    summary: dict[str, Any], baseline_rows: list[Row], k: int
+    summary: dict[str, Any],
+    baseline_rows: list[Row],
+    k: int,
+    cross_backend: bool = False,
 ) -> list[str]:
     base_k = max((row["trial"] for row in baseline_rows), default=k)
     base = summarize(baseline_rows, base_k)
@@ -106,6 +121,15 @@ def _comparison_lines(
         "",
         f"> 基线来自 `experiments/baseline/result_rows.jsonl`（W1 冻结，k={base_k}）；"
         "本报告不修改该文件。",
+    ]
+    if cross_backend:
+        lines += [
+            "",
+            "> ⚠️ **本次后端与冻结基线不同，本表只是数值罗列，不是消融实验。** "
+            "差异来自后端替换（含人为注入的故障），不能作为 harness 或护栏有效性的因果证据；"
+            "单变量对照必须在同一后端下、一次只改一个变量进行。",
+        ]
+    lines += [
         "",
         "| 指标 | 冻结基线 | 本次 | 变化 |",
         "| --- | --- | --- | --- |",
@@ -171,6 +195,7 @@ def render_report(
     config: ExperimentConfig,
     rid: str,
     baseline_rows: list[Row] | None = None,
+    config_path: str | None = None,
 ) -> str:
     """生成报告；内容只依赖结果行、配置与基线行，绝不依赖输出路径或时钟。"""
     summary = summarize(rows, config.k)
@@ -178,16 +203,24 @@ def render_report(
     for task in tasks:
         text = task["user_utterances"][0]
         briefs[task["id"]] = text[:24] + ("…" if len(text) > 24 else "")
-    backend_name = (
-        "ScriptedBackend（确定性脚本）"
-        if config.backend == "scripted"
-        else "OpenAIBackend"
+    backend_name = {
+        "scripted": "ScriptedBackend（确定性脚本）",
+        "seeded": "SeededBackend（确定性伪随机模拟器，仅用于校准测量链路）",
+        "openai": "OpenAIBackend",
+    }[config.backend]
+    seeded_rows = (
+        [
+            f"| seed | {config.seed} |",
+            f"| 故障注入率 | {config.fault_per_mille}/1000 |",
+        ]
+        if config.backend == "seeded"
+        else []
     )
     lines = [
         f"# 实验结果：{config.name} / `{rid}`",
         "",
         "> 本表由 `python -m eval.run` 依据结果行如实生成，数字未修饰。",
-        "> 生效配置来自 `experiments/config.toml` 与显式 CLI 覆盖；留档模式下"
+        "> 生效配置来自实验配置文件与显式 CLI 覆盖；留档模式下"
         "同目录另有 `config.json` 存证。`run_id` 由配置摘要确定性生成，"
         "同配置必得同一 `run_id`。",
         "",
@@ -197,6 +230,7 @@ def render_report(
         "| --- | --- |",
         f"| run_id | `{rid}` |",
         f"| 后端 | {backend_name} |",
+        *seeded_rows,
         f"| 任务集 | `{config.tasks}` |",
         f"| 任务数 | {summary['task_count']} |",
         f"| k | {summary['k']} |",
@@ -243,9 +277,23 @@ def render_report(
         )
     lines += [""] + _attribution_lines(rows)
     if baseline_rows is not None:
-        lines += [""] + _comparison_lines(summary, baseline_rows, config.k)
-    reproduce = f"python -m eval.run --tasks {config.tasks} --k {config.k}"
-    if config.backend != "scripted":
+        lines += [""] + _comparison_lines(
+            summary,
+            baseline_rows,
+            config.k,
+            cross_backend=config.backend != "scripted",
+        )
+    reproduce = "python -m eval.run"
+    if config_path:
+        # 非默认配置文件必须显式带上，否则复现命令会算出另一个 run_id
+        reproduce += f" --config {config_path}"
+    reproduce += f" --tasks {config.tasks} --k {config.k}"
+    if config.backend == "seeded":
+        reproduce += (
+            f" --backend seeded --seed {config.seed}"
+            f" --fault-per-mille {config.fault_per_mille}"
+        )
+    elif config.backend == "openai":
         reproduce += " --backend openai"
     lines += [
         "",

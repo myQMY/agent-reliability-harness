@@ -87,11 +87,23 @@ class TestExperimentConfig(unittest.TestCase):
             for body in (
                 '[experiment]\ntypo_field = 1\n',
                 '[mystery]\nx = 1\n',
+                '[seeded]\ntypo_field = 1\n',
             ):
                 path.write_text(body, encoding="utf-8")
                 with self.subTest(body=body.strip()):
                     with self.assertRaises(ValueError):
                         exp_config.load_config(path)
+
+    def test_seeded_section_is_applied(self):
+        with TemporaryDirectory() as d:
+            path = Path(d) / "cfg.toml"
+            path.write_text(
+                '[experiment]\nbackend = "seeded"\n'
+                '[seeded]\nseed = 99\nfault_per_mille = 250\n',
+                encoding="utf-8",
+            )
+            cfg = exp_config.load_config(path)
+        self.assertEqual((cfg.backend, cfg.seed, cfg.fault_per_mille), ("seeded", 99, 250))
 
     def test_invalid_values_are_rejected(self):
         base = exp_config.load_config()
@@ -102,6 +114,9 @@ class TestExperimentConfig(unittest.TestCase):
             {"max_steps": 0},
             {"max_json_retries": -1},
             {"tasks": ""},
+            {"seed": -1},
+            {"fault_per_mille": -1},
+            {"fault_per_mille": 1001},
         ):
             with self.subTest(changes=changes):
                 with self.assertRaises(ValueError):
@@ -109,6 +124,39 @@ class TestExperimentConfig(unittest.TestCase):
 
 
 class TestRunId(unittest.TestCase):
+    FROZEN_RID = "baseline_scripted-a346e8acef15"
+    FROZEN_SNAPSHOT = (
+        '{"config":{"backend":"scripted","compare":'
+        '"experiments/baseline/result_rows.jsonl","k":3,'
+        '"max_json_retries":2,"max_steps":12,"name":'
+        '"baseline_scripted","tasks":"tasks/mvp_10.jsonl"},'
+        '"run_id":"baseline_scripted-a346e8acef15"}'
+    )
+
+    def test_default_run_id_is_frozen(self):
+        """W2.5 加 seed 字段不得改变 W1 冻结留档的 run_id。"""
+        cfg = exp_config.load_config()
+        self.assertEqual(exp_config.run_id(cfg), self.FROZEN_RID)
+
+    def test_default_config_snapshot_is_frozen(self):
+        """config.json 快照逐字节不变，否则默认归档目录会被悄悄改写。"""
+        cfg = exp_config.load_config()
+        self.assertEqual(
+            trace.dumps(exp_config.config_snapshot(cfg, self.FROZEN_RID)),
+            self.FROZEN_SNAPSHOT,
+        )
+
+    def test_seeded_parameters_change_run_id(self):
+        base = exp_config.with_overrides(
+            exp_config.load_config(), backend="seeded", seed=1, fault_per_mille=100
+        )
+        ids = {exp_config.run_id(base)}
+        ids.add(exp_config.run_id(exp_config.with_overrides(base, seed=2)))
+        ids.add(exp_config.run_id(exp_config.with_overrides(base, fault_per_mille=200)))
+        self.assertEqual(len(ids), 3)
+        self.assertIn("seed", exp_config._core(base))
+        self.assertNotIn("seed", exp_config._core(exp_config.load_config()))
+
     def test_stable_and_path_safe(self):
         cfg = exp_config.load_config()
         rid = exp_config.run_id(cfg)
@@ -187,6 +235,33 @@ class TestReport(unittest.TestCase):
         self.assertNotIn("尚未接入 usage 观测", text)
         self.assertIn("--backend openai", text)
         self.assertNotIn("必然相等", text)
+
+    def test_seeded_caveats_are_honest(self):
+        text = self._render("seeded", None)
+        for phrase in (
+            "确定性伪随机模拟器",
+            "首次具备区分度",
+            "没有语言理解能力",
+            "不构成任何模型能力",
+            "不是成本数据",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, text)
+        self.assertNotIn("--backend openai", text)
+        self.assertIn("--backend seeded", text)
+
+    def test_cross_backend_diff_has_warning(self):
+        rows = trace.read_jsonl(BASELINE_ROWS)
+        text = self._render("seeded", rows)
+        self.assertIn("## 与冻结基线对照", text)
+        self.assertIn("本次后端与冻结基线不同", text)
+        self.assertIn("不能作为 harness 或护栏有效性的因果证据", text)
+
+    def test_scripted_diff_has_no_cross_backend_warning(self):
+        rows = trace.read_jsonl(BASELINE_ROWS)
+        self.assertNotIn(
+            "本次后端与冻结基线不同", self._render("scripted", rows)
+        )
 
     def test_diff_table_on_identical_rows(self):
         rows = trace.read_jsonl(BASELINE_ROWS)

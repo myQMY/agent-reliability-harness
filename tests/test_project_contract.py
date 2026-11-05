@@ -186,6 +186,44 @@ class TestTechStackDoc(unittest.TestCase):
                 self.assertIn(compact(phrase), text, f"技术方案缺少排除项：{phrase}")
 
 
+class TestSeededCalibrationContract(unittest.TestCase):
+    """W2.5 校准器：确定性、零成本、口径诚实，且不得悄悄改变冻结基线。"""
+
+    def test_seeded_backend_sources_are_deterministic(self):
+        source = read("runtime/model.py")
+        for phrase in (
+            "SeededBackend",
+            "GUARD_REJECT_PREFIX",
+            "hashlib.sha256",
+            "fault_per_mille",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, source)
+        self.assertNotIn("uuid", source)
+        self.assertNotIn("random.seed", source)
+
+    def test_calibration_config_is_versioned(self):
+        self.assertTrue((ROOT / "experiments/calibration.toml").is_file())
+        self.assertIn('backend = "seeded"', read("experiments/calibration.toml"))
+        self.assertIn("[seeded]", read("experiments/calibration.toml"))
+
+    def test_default_config_has_no_seeded_section_values(self):
+        """默认配置里写 [seeded] 值会改变 run_id，冻结留档随即失效。"""
+        text = read("experiments/config.toml")
+        self.assertNotIn("seed =", text)
+        self.assertNotIn("fault_per_mille =", text)
+
+    def test_docs_describe_calibration_honestly(self):
+        readme = compact(read("README.md"))
+        stack = compact(read("docs/tech-stack.md"))
+        for phrase in ("SeededBackend", "pass^k", "校准"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(compact(phrase), readme, f"README 缺少 {phrase}")
+        for phrase in ("SeededBackend", "伪随机", "不构成"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(compact(phrase), stack, f"技术方案缺少 {phrase}")
+
+
 class TestExperimentRecords(unittest.TestCase):
     """P0 实验记录体系是 W3 对照实验的地基：配置、冻结基线、留档约定不得回潮。"""
 

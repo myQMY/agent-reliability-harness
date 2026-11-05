@@ -47,8 +47,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tasks", type=Path, default=None)
     parser.add_argument("--k", type=int, default=None)
     parser.add_argument(
-        "--backend", choices=("scripted", "openai"), default=None
+        "--backend", choices=("scripted", "openai", "seeded"), default=None
     )
+    # 仅 backend = seeded 时生效；不传则由 [seeded] 配置段决定
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--fault-per-mille", type=int, default=None)
     parser.add_argument("--results-dir", type=Path, default=Path("results"))
     parser.add_argument("--traces-dir", type=Path, default=Path("traces"))
     parser.add_argument(
@@ -73,14 +76,21 @@ def main(argv: list[str] | None = None) -> int:
         tasks=args.tasks.as_posix() if args.tasks is not None else None,
         k=args.k,
         backend=args.backend,
+        seed=args.seed,
+        fault_per_mille=args.fault_per_mille,
     )
     rid = exp_config.run_id(cfg)
 
-    backend = (
-        config_from_env(load_dotenv(args.env_file))
-        if cfg.backend == "openai"
-        else BackendConfig()
-    )
+    if cfg.backend == "openai":
+        backend = config_from_env(load_dotenv(args.env_file))
+    elif cfg.backend == "seeded":
+        backend = BackendConfig(
+            name="seeded",
+            seed=cfg.seed,
+            fault_per_mille=cfg.fault_per_mille,
+        )
+    else:
+        backend = BackendConfig()
     tasks_path = exp_config.resolve_input(cfg.tasks)
     run_config = runner.RunConfig(
         tasks_path=tasks_path,
@@ -100,7 +110,19 @@ def main(argv: list[str] | None = None) -> int:
         if compare_path.is_file():
             baseline_rows = trace.read_jsonl(compare_path)
 
-    report = analyze.render_report(rows, tasks, cfg, rid, baseline_rows)
+    # 非默认配置文件必须写进报告的复现命令，否则重跑会算出另一个 run_id；
+    # 只写仓库内相对路径，报告里不出现绝对路径或机器信息。
+    config_path: str | None = None
+    chosen = Path(args.config).resolve()
+    if chosen != exp_config.DEFAULT_CONFIG_PATH.resolve():
+        try:
+            config_path = chosen.relative_to(REPO_ROOT).as_posix()
+        except ValueError:
+            config_path = None
+
+    report = analyze.render_report(
+        rows, tasks, cfg, rid, baseline_rows, config_path=config_path
+    )
 
     if args.report is not None:
         report_path = Path(args.report)

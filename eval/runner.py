@@ -49,7 +49,12 @@ def _run_trial(
 ) -> Row:
     trial_id = f"{task['id']}-t{trial}"
     conn = db.reset(template)
-    backend = build_backend(config.backend, task.get("script", ()))
+    backend = build_backend(
+        config.backend,
+        task.get("script", ()),
+        task_id=task["id"],
+        trial=trial,
+    )
     counter = loop.StepCounter()
     budget = guard.StepBudget(max_steps=config.max_steps)
     simulator = RuleUserSimulator(
