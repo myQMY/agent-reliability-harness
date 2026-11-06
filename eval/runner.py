@@ -7,15 +7,15 @@ trial_id = task_id + trial index，同时作为结果行字段与 trace 文件�
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from env import db
-from eval import grader, trace
+from eval import budget, grader, trace
 from eval.user_sim import RuleUserSimulator, TurnContext
 from runtime import guard, loop
-from runtime.model import BackendConfig, build_backend
+from runtime.model import BackendConfig, build_backend, build_tool_context
 
 Task = dict[str, Any]
 Row = dict[str, Any]
@@ -33,6 +33,9 @@ class RunConfig:
     max_json_retries: int = guard.MAX_JSON_RETRIES
     # W3 起的可开关护栏；空元组表示全部关闭（OFF 组），逐字等价 W1 行为
     guards: tuple[str, ...] = ()
+    # W4 起真实模型专用：None = 不启用预算闸门（确定性后端默认如此）。
+    # 预算不进入 run_id——它不是实验自变量，只是花钱的安全阀。
+    budget_limit: budget.BudgetLimit | None = None
 
 
 def load_tasks(path: Path) -> list[Task]:
@@ -48,17 +51,30 @@ def _run_trial(
     trial: int,
     config: RunConfig,
     template: Any,
+    ledger: budget.BudgetLedger | None = None,
 ) -> Row:
     trial_id = f"{task['id']}-t{trial}"
     conn = db.reset(template)
+    backend_config = config.backend
+    # 真实模型路径才需要工具清单 + 初始领域状态：确定性后端按任务脚本走，
+    # 不构造也不消费这段文本，因此既有 run_id / trace / 结果行逐字节不变。
+    if backend_config.name == "openai" and not backend_config.system_prompt:
+        backend_config = replace(
+            backend_config,
+            system_prompt=build_tool_context(db.dump_state(conn)),
+        )
     backend = build_backend(
-        config.backend,
+        backend_config,
         task.get("script", ()),
         task_id=task["id"],
         trial=trial,
     )
+    # 闸门包在整个 run 共享的 ledger 上，per-trial 新建后端不会把累计清零。
+    if config.budget_limit is not None and ledger is not None:
+        backend = budget.BudgetedBackend(backend, ledger, config.budget_limit)
     counter = loop.StepCounter()
-    budget = guard.StepBudget(max_steps=config.max_steps)
+    # 局部变量不能叫 budget：它会遮蔽 eval.budget 模块（W4 成本闸门）。
+    step_budget = guard.StepBudget(max_steps=config.max_steps)
     # 幂等键集合必须在整个 trial（可能跨多个 turn）共享；不开护栏时连对象
     # 都不创建，OFF 组因此与 W1 冻结基线逐字节等价。
     guard_state = (
@@ -89,7 +105,7 @@ def _run_trial(
             conn,
             trial_id=trial_id,
             counter=counter,
-            budget=budget,
+            budget=step_budget,
             max_json_retries=config.max_json_retries,
             guards=config.guards,
             guard_state=guard_state,
@@ -129,7 +145,7 @@ def _run_trial(
         "failure_type": verdict["failure_type"],
         "reasons": verdict["reasons"],
         "first_divergence": verdict["first_divergence"],
-        "steps": budget.used,
+        "steps": step_budget.used,
         "tokens": sum(span["tokens"] for span in spans),
         "latency_ms": sum(span["latency_ms"] for span in spans),
         "invalid_calls": len(errors),
@@ -142,10 +158,13 @@ def _run_trial(
 def run(config: RunConfig) -> list[Row]:
     tasks = load_tasks(config.tasks_path)
     rows: list[Row] = []
+    ledger = (
+        budget.BudgetLedger() if config.budget_limit is not None else None
+    )
     for task in tasks:
         template = db.build_template(task["initial_db"])
         for trial in range(1, config.k + 1):
-            rows.append(_run_trial(task, trial, config, template))
+            rows.append(_run_trial(task, trial, config, template, ledger))
         template.close()
     rows.sort(key=lambda row: (row["task_id"], row["trial"]))
     trace.write_jsonl(config.results_dir / "result_rows.jsonl", rows)

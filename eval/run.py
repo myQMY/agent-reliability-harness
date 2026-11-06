@@ -12,7 +12,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from eval import analyze
+from eval import analyze, budget
 from eval import config as exp_config
 from eval import runner, trace
 from runtime.guard import GUARD_NAMES
@@ -64,6 +64,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--report", type=Path, default=None)
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
+    # W4 起真实模型专用预算闸门：不进 run_id（不是实验自变量），但必须显式
+    # 给出，避免忘设上限时一次跑批静默烧钱。确定性后端传这些参数直接报错。
+    parser.add_argument("--max-calls", type=int, default=None)
+    parser.add_argument("--max-total-tokens", type=int, default=None)
+    parser.add_argument("--max-cost", type=float, default=None)
+    parser.add_argument("--price-in", type=float, default=None)
+    parser.add_argument("--price-out", type=float, default=None)
+    parser.add_argument("--currency", default=None)
     return parser
 
 
@@ -89,8 +97,46 @@ def main(argv: list[str] | None = None) -> int:
     )
     rid = exp_config.run_id(cfg)
 
+    budget_limit: budget.BudgetLimit | None = None
+    budget_args = (
+        args.max_calls,
+        args.max_total_tokens,
+        args.max_cost,
+        args.price_in,
+        args.price_out,
+        args.currency,
+    )
     if cfg.backend == "openai":
+        if args.max_calls is None:
+            raise SystemExit(
+                "接真实模型前必须显式设置预算：至少传 --max-calls <调用数上界>。"
+                "先用 `python -m eval.budget --tasks <任务集> --k 3 --cells 2` "
+                "离线上算，再据此确定上限；预算闸门会在超限调用前停止。"
+            )
+        price = None
+        if args.price_in is not None or args.price_out is not None:
+            if args.price_in is None or args.price_out is None:
+                raise SystemExit("--price-in 与 --price-out 必须成对给出")
+            price = budget.PriceCard(
+                args.price_in, args.price_out, args.currency or "CNY"
+            )
+        if args.max_cost is not None and price is None:
+            raise SystemExit(
+                "--max-cost 需要同时给出 --price-in / --price-out 才能换算"
+            )
+        budget_limit = budget.BudgetLimit(
+            max_calls=args.max_calls,
+            max_total_tokens=args.max_total_tokens,
+            max_cost=args.max_cost,
+            price=price,
+        )
+        budget_limit.validate()
         backend = config_from_env(load_dotenv(args.env_file))
+    elif any(value is not None for value in budget_args):
+        raise SystemExit(
+            "预算参数仅在 --backend openai 下生效；确定性后端不产生真实调用，"
+            "传了也不该假装生效"
+        )
     elif cfg.backend == "seeded":
         backend = BackendConfig(
             name="seeded",
@@ -109,8 +155,15 @@ def main(argv: list[str] | None = None) -> int:
         max_steps=cfg.max_steps,
         max_json_retries=cfg.max_json_retries,
         guards=cfg.guards,
+        budget_limit=budget_limit,
     )
-    rows = runner.run(run_config)
+    try:
+        rows = runner.run(run_config)
+    except budget.BudgetExceeded as exc:
+        raise SystemExit(
+            f"预算闸门触发，已停止产生新的模型调用：{exc}。"
+            "已经发出的调用仍会计费；请核对累计用量后再决定是否提高上限。"
+        ) from exc
     tasks = runner.load_tasks(tasks_path)
 
     baseline_rows = None

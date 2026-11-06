@@ -15,6 +15,14 @@ SeededBackend 是 W3 之前的测量链路校准器：以任务脚本为「意�
 JSON 解析与重试属于运行时护栏，由 runtime/loop.py 负责，不放在这里。
 OpenAIBackend 用标准库 urllib 直接调用 OpenAI 兼容的 HTTP 接口，
 因此连可选后端都不需要第三方 SDK，全程零依赖。
+
+W4 前置：真实模型路径需要两件确定性后端不需要的东西——
+(1) 工具清单与 trial 初始领域状态必须写进 system prompt，否则模型只读到
+    用户话术，连 customer_id / 参数名都无从得知；(2) loop 用 role=tool
+    记工具观察，而 chat completions 的 tool role 必须带 tool_call_id，
+    本项目不用原生 tool_calls 协议，需在发出前转成 user 文本。
+两件事都只在 OpenAIBackend 内发生，ScriptedBackend / SeededBackend 的
+调用方与产物完全不变。
 """
 from __future__ import annotations
 
@@ -25,7 +33,7 @@ import random
 import time
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Protocol, Sequence
+from typing import Any, Mapping, Protocol, Sequence
 
 from env import tools
 from runtime import guard
@@ -40,6 +48,11 @@ SYSTEM_PROMPT = (
 # 护栏协议的权威定义在 runtime/guard.py；这里 re-export 保持既有导入路径，
 # 避免测试与调用方因常量搬家而失效。运行时的 RETRY_HINT / 工具报错不触发纠正。
 GUARD_REJECT_PREFIX = guard.GUARD_REJECT_PREFIX
+
+# loop 内部用 role=tool 记录工具观察；转成 chat completions 消息时统一加这个
+# 前缀，避免没有 tool_call_id 的 tool role 被服务端拒绝。前缀只出现在发往
+# 真实模型的 HTTP payload 里，不写进 trace / 结果行，判分链路不受影响。
+TOOL_RESULT_PREFIX = "[TOOL-RESULT]"
 
 # 会写坏领域库状态的动作，duplicate_call 故障只重放这些。
 # 与护栏 / 判分器共用 env/tools.WRITE_TOOLS，避免三处清单漂移。
@@ -88,6 +101,34 @@ class BackendConfig:
     # 仅 SeededBackend 使用；scripted / openai 下恒为 0，不影响任何既有行为
     seed: int = 0
     fault_per_mille: int = 0
+    # 仅 openai 后端生效：附加到基础 SYSTEM_PROMPT 之后的确定性上下文
+    # （工具清单 + 本 trial 的初始领域库状态）。空字符串 = 不附加。
+    system_prompt: str = ""
+
+
+def build_tool_context(state: Mapping[str, Any]) -> str:
+    """把工具清单与 trial 初始领域库状态序列化成确定性的 system prompt 片段。
+
+    只被 OpenAIBackend 消费：确定性后端按任务脚本走，不需要也不读取它。
+    工具 schema 以 env/tools.TOOL_SCHEMAS 为唯一事实来源，状态由
+    env/db.dump_state 给出，json.dumps 固定 sort_keys / 紧凑分隔符，
+    因此同任务同 trial 的文本逐字节一致，不引入时间 / 随机 / 机器信息。
+    """
+    lines = [
+        "可用工具（每次回复只能输出一个 JSON 对象，且只能调用其中一个；"
+        "args 必须包含该工具要求的全部字段）：",
+    ]
+    for name in sorted(tools.TOOL_SCHEMAS):
+        required = ", ".join(tools.TOOL_SCHEMAS[name]["required"])
+        lines.append(f"- {name}：必需参数 {required}")
+    lines.append("")
+    lines.append("本轮开始时的领域库状态（工具调用会改变它，这里只是起点）：")
+    lines.append(
+        json.dumps(
+            state, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+    )
+    return "\n".join(lines)
 
 
 class ScriptedBackend:
@@ -246,6 +287,26 @@ class SeededBackend:
         return ModelReply(text=self._fault_text(kind, action))
 
 
+def _wire_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    """把 harness 内部消息转成 OpenAI 兼容 chat completions 可接受的形式。
+
+    loop 用 ``role=tool`` 记录观察，但 chat completions 的 tool role 必须
+    携带 ``tool_call_id``；本项目用纯文本 JSON 动作、不走原生 tool_calls，
+    直接发会收到 400。转成 user 文本、加可读前缀，语义不变。
+    guard 拒绝消息本来就是 role=user，原样保留。
+    """
+    wired: list[dict[str, str]] = []
+    for message in messages:
+        role, content = message["role"], message["content"]
+        if role == "tool":
+            wired.append(
+                {"role": "user", "content": f"{TOOL_RESULT_PREFIX} {content}"}
+            )
+        else:
+            wired.append({"role": role, "content": content})
+    return wired
+
+
 class OpenAIBackend:
     """OpenAI 兼容 chat completions 后端；opener 可注入以便离线单测。"""
 
@@ -256,16 +317,29 @@ class OpenAIBackend:
         model: str,
         *,
         opener: Any = None,
+        system_prompt: str = "",
     ):
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._model = model
         self._opener = opener if opener is not None else urllib.request.urlopen
+        # 附加上下文为空时严格退回 W2 的原始提示，既有留档与单测不变
+        self._system_prompt = (
+            f"{SYSTEM_PROMPT}\n\n{system_prompt}" if system_prompt else SYSTEM_PROMPT
+        )
+
+    @property
+    def system_prompt(self) -> str:
+        """暴露最终提示，便于离线断言真实模型能看到工具清单与领域状态。"""
+        return self._system_prompt
 
     def generate(self, messages: list[dict[str, str]]) -> ModelReply:
         payload = {
             "model": self._model,
-            "messages": [{"role": "system", "content": SYSTEM_PROMPT}, *messages],
+            "messages": [
+                {"role": "system", "content": self._system_prompt},
+                *_wire_messages(messages),
+            ],
             "temperature": 0,
         }
         request = urllib.request.Request(
@@ -306,7 +380,12 @@ def build_backend(
             raise ValueError(
                 "OpenAIBackend 需要 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL"
             )
-        return OpenAIBackend(config.base_url, config.api_key, config.model)
+        return OpenAIBackend(
+            config.base_url,
+            config.api_key,
+            config.model,
+            system_prompt=config.system_prompt,
+        )
     raise ValueError(f"未知后端：{config.name}")
 
 

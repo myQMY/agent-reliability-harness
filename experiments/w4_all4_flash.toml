@@ -1,0 +1,20 @@
+# W4 真实模型实验组：四条护栏全开
+
+# 与 w4_off_flash.toml 构成单变量对照：测量链路上唯一不同的自变量是
+# [guards].enabled。name / compare 只决定落盘位置与对照来源，不进测量链路
+# （与 W3 四份 A/B 配置同一口径）。name 带模型标识，换模型必须改名。
+# 尚未确认 API 预算与密钥时不要运行。
+
+[experiment]
+name = "w4_all4_flash"
+tasks = "tasks/mvp_10.jsonl"
+k = 3
+backend = "openai"
+# 指向 OFF 组留档的结果行，报告因此生成「与对照组对照（A/B）」表。
+# 该路径由 run_id 确定性推导，不依赖时间戳。
+compare = "experiments/runs/w4_off_flash-61491decf48c/result_rows.jsonl"
+
+[guards]
+max_steps = 12
+max_json_retries = 2
+enabled = ["schema_validation", "idempotency", "tool_retry", "json_recovery"]

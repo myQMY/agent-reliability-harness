@@ -2,7 +2,7 @@
 
 面向多轮工具调用 Agent 的可靠性评测与运行时平台。
 
-> 状态：W1 全部、W2 全量（判分 / trace / 真实模型观测 / 条件话术 / trace 归因）、P0 实验记录体系、W2.5 测量链路校准，以及 W3 四条护栏（`schema_validation` / `idempotency` / `tool_retry` / `json_recovery`）的单变量 A/B、2×2 全因子、多种子稳健性检验、可达上限分析、`pass^k` 分辨率与效应掩蔽审计、模型能力轴 × 护栏轴归因对照，以及 v2 扩展任务集与分辨率实测对照已落地。本文件不写任何未经验证的结论；所有指标以 `experiments/` 下可复现的结果为准。
+> 状态：W1 全部、W2 全量（判分 / trace / 真实模型观测 / 条件话术 / trace 归因）、P0 实验记录体系、W2.5 测量链路校准，以及 W3 四条护栏（`schema_validation` / `idempotency` / `tool_retry` / `json_recovery`）的单变量 A/B、2×2 全因子、多种子稳健性检验、可达上限分析、`pass^k` 分辨率与效应掩蔽审计、模型能力轴 × 护栏轴归因对照，以及 v2 扩展任务集与分辨率实测对照已落地；W4 前置（真实模型上下文、预算闸门、`[GUARD-REJECT]` 纠正探针离线校准）已就绪，**尚未发起任何真实模型 API 请求，未花一分钱**。本文件不写任何未经验证的结论；所有指标以 `experiments/` 下可复现的结果为准。
 
 ## 为什么做这个
 
@@ -26,8 +26,8 @@ Agent demo 和能稳定运行的 Agent 之间，差的通常不是模型能力�
 | `runtime/` | 自研薄运行时：循环、护栏、上下文与预算管理 |
 | `eval/` | 用户模拟器、批量执行器、终态判分、归因分析、CLI |
 | `web/` | trace 回放与实验对照面板（W5） |
-| `docs/` | 产品设计与技术实现方案 |
-| `experiments/` | 版本化实验配置（`config.toml` / `calibration.toml` / `guard_ab_*.toml`）、冻结基线、按 `run_id` 留档的报告与结果行、`w3_guard_matrix.md` 因子汇总、`w3_robustness.md` 多种子稳健性检验、`w3_tool_retry_sweep.md` / `w3_json_recovery_sweep.md` 跨 seed A/B、`w3_ceiling.md` 可达上限分析、`w3_resolution.md` 分辨率与效应掩蔽审计、`w3_attribution.md` 模型能力轴归因对照、`w3_taskset_scale.md` v2 扩展任务集分辨率实测 |
+| `docs/` | 产品设计与技术实现方案；W4 真实模型实验设计见 [docs/w4-design.md](docs/w4-design.md) |
+| `experiments/` | 版本化实验配置（`config.toml` / `calibration.toml` / `guard_ab_*.toml` / `w4_*_flash.toml`）、冻结基线、按 `run_id` 留档的报告与结果行、`w3_guard_matrix.md` 因子汇总、`w3_robustness.md` 多种子稳健性检验、`w3_tool_retry_sweep.md` / `w3_json_recovery_sweep.md` 跨 seed A/B、`w3_ceiling.md` 可达上限分析、`w3_resolution.md` 分辨率与效应掩蔽审计、`w3_attribution.md` 模型能力轴归因对照、`w3_taskset_scale.md` v2 扩展任务集分辨率实测、`w4_budget_estimate.md` 离线上界与 `w4_probe_dryrun.md` 探针校准 |
 | `tests/` | 单元测试与回归用例 |
 | `traces/`, `results/` | 运行产物，自动创建、不入库 |
 
@@ -250,9 +250,29 @@ python -m eval.taskset_scale --from-jsonl     # 只读证据重渲染
 
 `pass^k` 仍是二值化指标，步进变细不等于效应量变连续；这是描述性统计、不是显著性检验，不外推真实模型、不替代 W4。
 
+## W4 前置：真实模型路径的可测性、预算闸门与纠正探针
+
+W3 收口后路线表只剩 W4：接真实模型验证 `[GUARD-REJECT]` 能否被读懂并改对。此前一直把「先定 API 预算」当作门槛，但把真实模型路径从头读一遍会发现三个**更靠前、且零成本可修**的工程缺口——不补上，给了密钥和预算也只会得到一批与 `[GUARD-REJECT]` 无关的全败：
+
+| 缺口 | 后果 | 本轮修复 |
+| --- | --- | --- |
+| `SYSTEM_PROMPT` 只讲输出格式，没有工具清单 / 参数名 / 领域库状态 | 用户话术只有「我要退 O-100，退 2500 分」，模型无从得知 `refund_order`、`amount_cents`、`customer_id=C-1` | `runtime/model.build_tool_context()` 把 `env/tools.TOOL_SCHEMAS` 与 `db.dump_state()` 序列化成确定性片段，只由 `OpenAIBackend` 消费 |
+| loop 用 `role=tool` 记工具观察，而 chat completions 的 tool role 必须带 `tool_call_id` | 本项目走纯文本 JSON 动作、不用原生 `tool_calls`，第一次工具调用后请求即被判 400 | `OpenAIBackend._wire_messages()` 在发请求前转成带 `[TOOL-RESULT]` 前缀的 user 文本；trace / 结果行 / 判分不变 |
+| 没有成本上限 | 模型陷入循环时 `MAX_STEPS=12` × 任务数 × k 会静默烧钱 | `eval/budget.py` 的离线上界估算 + `BudgetedBackend` 跨 run 共享账本的硬闸门 |
+
+三处修复**严格只在 `openai` 后端生效**：两个确定性后端既不构造工具上下文也不包裹预算装饰器，既有 `run_id`、归档报告与冻结基线逐字节不变。两格实验配置 `experiments/w4_off_flash.toml` / `w4_all4_flash.toml` 已写好，只差 `[guards].enabled` 一个自变量；`compare` 指向 OFF 组留档，不指向 W1 冻结基线。
+
+**预算结论（判断先行）**：`python -m eval.budget` 按 DeepSeek 官方 off-peak 标价（$0.15 / $0.6 每百万 tokens）算出首轮 `mvp_10` × k=3 × 2 格的**调用次数上界 720 次、费用上界 $0.2484 ≈ ¥1.79**；把 peak 时段翻倍和 thinking mode 1000 output/次都叠上的最保守情景也只到 **$1.1880 ≈ ¥8.55**。证据见 [experiments/w4_budget_estimate.md](experiments/w4_budget_estimate.md)。所以卡点根本不是钱，只有两件事要定：**用哪家 / 哪个模型，以及是否愿意提供 API key**。闸门把预算变成命令行的硬约束——`python -m eval.run --backend openai` 不显式给 `--max-calls` 会直接拒绝启动，超限调用前抛 `BudgetExceeded` 停止。单价全部由命令行注入，本仓库不硬编码任何服务商价格（第三方聚合站的报价互相矛盾，只采信官方定价页，且价格会变）。
+
+`[GUARD-REJECT]` 的尺子也先离线校准了：`python -m eval.guard_probe` 用 `SeededBackend` 跑 OFF / 四条全开两格，OFF 组数到 **0** 次拒绝，全开组数到 **7** 次拒绝、其中 **4** 次 responsive，四类护栏都能分别归类（证据 [experiments/w4_probe_dryrun.md](experiments/w4_probe_dryrun.md)）。**这只证明探针数得对，不是 W4 的实验结论**——模拟器的 `_pending_correct` 是硬编码重发，它当然「读得懂」。探针把拒绝后的下一次输出分成 `no_reply` / `unparseable` / `repeated` / `responsive` 四态；responsive 只是**输出层面的机制证据**，不是任务成功、不是护栏有效，论效果仍然只认 `pass^k`。W4 跑完可用 `--traces-dir` 只读复用同一把尺子。
+
+**口径边界比数字更重要**：W3 的 7 条「脚本固有缺陷」是 `ScriptedBackend` / `SeededBackend` **脚本的属性**，真实模型根本不读脚本；W3 的 0.1433 / 0.3000、可达上限 0.30、`fpm` 模型能力轴在 W4 全部失效，W4 还多了一个 system prompt 自变量。因此 W3 与 W4 的数字**不可混用、不可拼成一条曲线**，W4 的因果结论只能来自同模型同配置下的两格内部 A/B。`temperature=0` 也不等于逐字节可复现。若实验组 responsive 接近 0，就触发设计文档里写死的可证伪条件：W3 机制不得外推，应改协议而不是调文案。
+
+完整实验矩阵、可证伪条件、价格来源、停止条件与确认预算后的执行清单见 [docs/w4-design.md](docs/w4-design.md)。**本轮未修改 `mvp_10.jsonl` / `mvp_30.jsonl` 一个字节**（sha256 由 `tests/test_w4_readiness.py` 钉死）；若还要更细的 `pass^k` 分辨率，只能新增版本化任务集并另开实验组。
+
 ## 开发路线
 
-> W1 全部、W2 全量、P0 实验记录体系、W2.5 校准，以及 W3 四条护栏、2×2 全因子、多种子稳健性检验、可达上限分析、分辨率审计、模型能力轴归因对照与 v2 扩展任务集分辨率实测已落地（护栏阶段收口）；冻结基线见 [experiments/mvp_baseline.md](experiments/mvp_baseline.md)。
+> W1 全部、W2 全量、P0 实验记录体系、W2.5 校准，以及 W3 四条护栏、2×2 全因子、多种子稳健性检验、可达上限分析、分辨率审计、模型能力轴归因对照与 v2 扩展任务集分辨率实测已落地（护栏阶段收口）；W4 前置工程与离线证据已交付，真实模型跑批待确认服务商 / 密钥与预算闸门；冻结基线见 [experiments/mvp_baseline.md](experiments/mvp_baseline.md)。
 
 | 阶段 | 交付 |
 | --- | --- |
@@ -262,7 +282,7 @@ python -m eval.taskset_scale --from-jsonl     # 只读证据重渲染
 | W2 余项 | `ModelReply` 真实观测、条件话术、trace 首个偏离点归因与证据入库（已交付） |
 | W2.5 | `SeededBackend` 校准 `pass^k` 区分度，零成本、不接真实模型（已交付） |
 | W3 | 逐项修运行时，每组只改一个变量：`schema_validation` / `idempotency` 的 2×2 主效应 / 交互、30 个 seed 的稳健性检验、`tool_retry` 与 `json_recovery` 的跨 seed A/B，以及九格可达上限分析并收口、`pass^k` 分辨率与效应掩蔽审计、模型能力轴 × 护栏轴的 2×8 归因对照、v2 扩展任务集与分辨率实测（已交付）；上下文压缩 / 预算转到 W4 真实模型阶段 |
-| W4 | 4–6 组单变量对照实验，出成功率 / 成本帕累托图 |
+| W4 | 真实模型验证 `[GUARD-REJECT]`（前置工程 / 预算闸门 / 纠正探针已交付，首轮两格 A/B 待确认预算与密钥）；其后 4–6 组单变量对照实验，出成功率 / 成本帕累托图 |
 | W5 | 服务化、并发、容器化、trace 回放、测试 |
 | W6 | 中文扩展任务集、结果表、复现文档 |
 

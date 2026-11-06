@@ -1,0 +1,20 @@
+# W4 真实模型对照组：OFF（护栏全关）
+
+# 这是 W4 的对照组留档配置。name 带模型标识（flash）：run_id 的摘要里
+# 不含模型名 / 单价 / 预算（它们不是实验自变量），换模型必须同时改 name，
+# 否则新结果会覆盖同一 run_id 的报告。见 docs/w4-design.md §4。
+# 尚未确认 API 预算与密钥时不要运行；运行前先用 python -m eval.budget 估算。
+
+[experiment]
+name = "w4_off_flash"
+tasks = "tasks/mvp_10.jsonl"
+k = 3
+backend = "openai"
+# 对照组不与任何留档做 diff；W1 冻结基线是 scripted 后端，跨后端对照只是
+# 数值罗列，不能作因果解读。
+compare = ""
+
+[guards]
+max_steps = 12
+max_json_retries = 2
+# 故意不写 enabled：全部关闭，与 OFF 组语义一致。
