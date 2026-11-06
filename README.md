@@ -2,7 +2,7 @@
 
 面向多轮工具调用 Agent 的可靠性评测与运行时平台。
 
-> 状态：W1 全部、W2 全量（判分 / trace / 真实模型观测 / 条件话术 / trace 归因）、P0 实验记录体系、W2.5 测量链路校准，以及 W3 四条护栏（`schema_validation` / `idempotency` / `tool_retry` / `json_recovery`）的单变量 A/B、2×2 全因子、多种子稳健性检验、可达上限分析、`pass^k` 分辨率与效应掩蔽审计、模型能力轴 × 护栏轴归因对照，以及 v2 扩展任务集与分辨率实测对照已落地；W4 前置（真实模型上下文、预算闸门、`[GUARD-REJECT]` 纠正探针离线校准）已就绪，**尚未发起任何真实模型 API 请求，未花一分钱**。本文件不写任何未经验证的结论；所有指标以 `experiments/` 下可复现的结果为准。
+> 状态：W1 全部、W2 全量（判分 / trace / 真实模型观测 / 条件话术 / trace 归因）、P0 实验记录体系、W2.5 测量链路校准，以及 W3 四条护栏（`schema_validation` / `idempotency` / `tool_retry` / `json_recovery`）的单变量 A/B、2×2 全因子、多种子稳健性检验、可达上限分析、`pass^k` 分辨率与效应掩蔽审计、模型能力轴 × 护栏轴归因对照，以及 v2 扩展任务集与分辨率实测对照已落地；W4 前置工程与**首轮真实模型两格 A/B 已完成**（DeepSeek `deepseek-flash`，182 次真实调用）。首轮两格 `pass^k` 均为 0.00、纠正探针两组均 0 次拒绝，**H1 未被检验而非被证伪**；完整结论、三层根因与口径边界见 [experiments/w4_report.md](experiments/w4_report.md)。**W3 数字不得外推到真实模型，两组结果不可拼曲线。** 本文件不写任何未经验证的结论；所有指标以 `experiments/` 下可复现的结果为准。
 
 ## 为什么做这个
 
@@ -27,7 +27,7 @@ Agent demo 和能稳定运行的 Agent 之间，差的通常不是模型能力�
 | `eval/` | 用户模拟器、批量执行器、终态判分、归因分析、CLI |
 | `web/` | trace 回放与实验对照面板（W5） |
 | `docs/` | 产品设计与技术实现方案；W4 真实模型实验设计见 [docs/w4-design.md](docs/w4-design.md) |
-| `experiments/` | 版本化实验配置（`config.toml` / `calibration.toml` / `guard_ab_*.toml` / `w4_*_flash.toml`）、冻结基线、按 `run_id` 留档的报告与结果行、`w3_guard_matrix.md` 因子汇总、`w3_robustness.md` 多种子稳健性检验、`w3_tool_retry_sweep.md` / `w3_json_recovery_sweep.md` 跨 seed A/B、`w3_ceiling.md` 可达上限分析、`w3_resolution.md` 分辨率与效应掩蔽审计、`w3_attribution.md` 模型能力轴归因对照、`w3_taskset_scale.md` v2 扩展任务集分辨率实测、`w4_budget_estimate.md` 离线上界与 `w4_probe_dryrun.md` 探针校准 |
+| `experiments/` | 版本化实验配置（`config.toml` / `calibration.toml` / `guard_ab_*.toml` / `w4_*_flash.toml`）、冻结基线、按 `run_id` 留档的报告与结果行、`w3_guard_matrix.md` 因子汇总、`w3_robustness.md` 多种子稳健性检验、`w3_tool_retry_sweep.md` / `w3_json_recovery_sweep.md` 跨 seed A/B、`w3_ceiling.md` 可达上限分析、`w3_resolution.md` 分辨率与效应掩蔽审计、`w3_attribution.md` 模型能力轴归因对照、`w3_taskset_scale.md` v2 扩展任务集分辨率实测、`w4_budget_estimate.md` 离线上界、`w4_probe_dryrun.md` 探针校准、`w4_preflight.md` 跑批前就绪快照、**W4 首轮实测** `w4_report.md` 结论报告与 `w4_probe.md` 只读探针结果 |
 | `tests/` | 单元测试与回归用例 |
 | `traces/`, `results/` | 运行产物，自动创建、不入库 |
 
@@ -266,17 +266,28 @@ W3 收口后路线表只剩 W4：接真实模型验证 `[GUARD-REJECT]` 能否�
 
 **预算闸门的作用域不能读错**：上表的 720 是**两格合计**的计划上界，而 `--max-calls` 作用于**单次 `eval.run`**。单格上界是 360 次 / 612,000 tokens，两格是两次独立进程、各持一份账本，所以给每格 720 时合计硬上限是 **1440 次**，闸门保证的是「单格不失控」，不是「整轮不超某个总额」（设计文档 §4）。
 
-**跑批前的机器预检**：`python -m eval.w4_preflight` 零 API 请求、零花费，把执行清单里原本靠人肉记住的约束变成 12 项校验——单变量、`compare` 硬编码字符串与 OFF 组 `run_id` 是否对得上、两格 trace 目录是否冲突、两个任务集 sha256、`.env` 三个键、预算闸门是否覆盖单格上界。结果分 `PASS` / `FAIL`（配置写错）/ `BLOCKED`（外部输入没到位）三态，`--strict` 下未就绪返回非零退出码；[experiments/w4_preflight.md](experiments/w4_preflight.md) 是**状态快照，不是实验结果**。同时 `eval.run` 在 `openai` 后端下若找不到对照留档，会**在读取密钥、发起任何调用之前**拒绝启动——过去这里是静默跳过，会产出一份没有 A/B 对照表却返回 0 的假报告，而 W4 的结论恰恰来自那张表。当前预检如实报 **0 FAIL / 2 BLOCKED / NOT READY**（`.env` 与 OFF 组留档尚未生成）。
+**跑批前的机器预检**：`python -m eval.w4_preflight` 零 API 请求、零花费，把执行清单里原本靠人肉记住的约束变成 12 项校验——单变量、`compare` 硬编码字符串与 OFF 组 `run_id` 是否对得上、两格 trace 目录是否冲突、两个任务集 sha256、`.env` 三个键、预算闸门是否覆盖单格上界。结果分 `PASS` / `FAIL`（配置写错）/ `BLOCKED`（外部输入没到位）三态，`--strict` 下未就绪返回非零退出码；[experiments/w4_preflight.md](experiments/w4_preflight.md) 是**状态快照，不是实验结果**。同时 `eval.run` 在 `openai` 后端下若找不到对照留档，会**在读取密钥、发起任何调用之前**拒绝启动——过去这里是静默跳过，会产出一份没有 A/B 对照表却返回 0 的假报告，而 W4 的结论恰恰来自那张表。**预检有阶段语义**：跑 OFF 之前「OFF 组留档」那项必然是 `BLOCKED`，此时 `--strict` 必然非零退出，不能当放行闸门；首轮实测填好 `.env` 后为 `11 PASS / 1 BLOCKED / 0 FAIL`，OFF 留档生成后才转为 `12 PASS / READY`。
 
-`[GUARD-REJECT]` 的尺子也先离线校准了：`python -m eval.guard_probe` 用 `SeededBackend` 跑 OFF / 四条全开两格，OFF 组数到 **0** 次拒绝，全开组数到 **7** 次拒绝、其中 **4** 次 responsive，四类护栏都能分别归类（证据 [experiments/w4_probe_dryrun.md](experiments/w4_probe_dryrun.md)）。**这只证明探针数得对，不是 W4 的实验结论**——模拟器的 `_pending_correct` 是硬编码重发，它当然「读得懂」。探针把拒绝后的下一次输出分成 `no_reply` / `unparseable` / `repeated` / `responsive` 四态；responsive 只是**输出层面的机制证据**，不是任务成功、不是护栏有效，论效果仍然只认 `pass^k`。W4 跑完可用 `--traces-dir` 只读复用同一把尺子。
+`[GUARD-REJECT]` 的尺子也先离线校准了：`python -m eval.guard_probe` 用 `SeededBackend` 跑 OFF / 四条全开两格，OFF 组数到 **0** 次拒绝，全开组数到 **7** 次拒绝、其中 **4** 次 responsive，四类护栏都能分别归类（证据 [experiments/w4_probe_dryrun.md](experiments/w4_probe_dryrun.md)）。**这只证明探针数得对，不是 W4 的实验结论**——模拟器的 `_pending_correct` 是硬编码重发，它当然「读得懂」。探针把拒绝后的下一次输出分成 `no_reply` / `unparseable` / `repeated` / `responsive` 四态；responsive 只是**输出层面的机制证据**，不是任务成功、不是护栏有效，论效果仍然只认 `pass^k`。W4 首轮已用 `--traces-dir` 只读复用同一把尺子，结果见 [experiments/w4_probe.md](experiments/w4_probe.md)。
 
-**口径边界比数字更重要**：W3 的 7 条「脚本固有缺陷」是 `ScriptedBackend` / `SeededBackend` **脚本的属性**，真实模型根本不读脚本；W3 的 0.1433 / 0.3000、可达上限 0.30、`fpm` 模型能力轴在 W4 全部失效，W4 还多了一个 system prompt 自变量。因此 W3 与 W4 的数字**不可混用、不可拼成一条曲线**，W4 的因果结论只能来自同模型同配置下的两格内部 A/B。`temperature=0` 也不等于逐字节可复现。若实验组 responsive 接近 0，就触发设计文档里写死的可证伪条件：W3 机制不得外推，应改协议而不是调文案。
+**口径边界比数字更重要**：W3 的 7 条「脚本固有缺陷」是 `ScriptedBackend` / `SeededBackend` **脚本的属性**，真实模型根本不读脚本；W3 的 0.1433 / 0.3000、可达上限 0.30、`fpm` 模型能力轴在 W4 全部失效，W4 还多了一个 system prompt 自变量。因此 W3 与 W4 的数字**不可混用、不可拼成一条曲线**，W4 的因果结论只能来自同模型同配置下的两格内部 A/B。`temperature=0` 也不等于逐字节可复现。设计文档里写死的可证伪条件是「实验组 responsive 接近 0 ⇒ W3 机制不得外推，改协议而不是调文案」；首轮观测是**没有任何拒绝事件**，前提不成立，因此判定为 **H1 未被检验**，不是机制被证伪（见 [experiments/w4_report.md](experiments/w4_report.md) §8）。
 
-完整实验矩阵、可证伪条件、价格来源、停止条件与确认预算后的执行清单见 [docs/w4-design.md](docs/w4-design.md)。**本轮未修改 `mvp_10.jsonl` / `mvp_30.jsonl` 一个字节**（sha256 由 `tests/test_w4_readiness.py` 钉死）；若还要更细的 `pass^k` 分辨率，只能新增版本化任务集并另开实验组。
+完整实验矩阵、可证伪条件、价格来源、停止条件与执行清单见 [docs/w4-design.md](docs/w4-design.md)。**本轮未修改 `mvp_10.jsonl` / `mvp_30.jsonl` 一个字节**（sha256 由 `tests/test_w4_readiness.py` 钉死）；若还要更细的 `pass^k` 分辨率，只能新增版本化任务集并另开实验组。
+
+## W4 首轮实测：结论与边界
+
+2026-11-06 用 `deepseek-flash` 跑完两格（OFF `w4_off_flash-61491decf48c` / ALL4 `w4_all4_flash-f6a4ea1674dc`），各 30 trial、合计 182 次真实调用：
+
+- 两格 `pass¹` / `pass^3` **均为 0.00**，A/B 差值 +0.00，**没有分辨率**；平均步数 2.97 → 3.07、`policy_violation` 18 → 21 等差异**不能归因于护栏**（ALL4 的 `guard` span 为 0，护栏从未介入，差异来自模型服务侧波动）。
+- 纠正探针两组**都是 0 次 `[GUARD-REJECT]`、0 次 responsive**。**分母为 0 ≠ responsive 率 0%**，H1 **未被检验**，既未证实也未证伪；W3 机制继续不得外推到真实模型。
+- 全 0 是三层原因叠加：① 终态判分 `state != target` 含 `audit_log.notify.message` 的自由文本精确匹配，30/30 trial 都带 `terminal_state_mismatch`；② 模型确有真实策略违规（`policy:notify_after_refund` 18 / 20、3 个「无法退款」导致披露缺失）；③ 正常路径下真实模型 `invalid_calls = 0`、工具调用全成功，**没有产生任何可被拒绝的动作**——W3 的拒绝来自 `fault_per_mille` 注入，`openai` 后端没有这个自变量，护栏自然一次都没触发。
+- 只读重放（**假设性重算，不进 `pass^k`、不与 W3 比较**）：`orders` 状态与 target 一致 27/30、`required_disclosures` 齐全 27/30；若把 `notify` 话术从精确比对中剔除，假设性通过为 9/30 与 8/30。
+
+**不能讲大的四条**：不说护栏在真实模型上无效 / 有害；不说模型能力差；不把 W3 的 0.1433 / 0.3000 与 W4 拼成曲线；不把 `pass^k = 0` 说成分辨率为 0（分辨率恒为 `1/N`，与 k 无关）。完整数据表、重放口径、可证伪条件判定与四个下一步选项见 [experiments/w4_report.md](experiments/w4_report.md)。**本轮未改任何任务集、判分器或既有归档。**
 
 ## 开发路线
 
-> W1 全部、W2 全量、P0 实验记录体系、W2.5 校准，以及 W3 四条护栏、2×2 全因子、多种子稳健性检验、可达上限分析、分辨率审计、模型能力轴归因对照与 v2 扩展任务集分辨率实测已落地（护栏阶段收口）；W4 前置工程与离线证据已交付，真实模型跑批待确认服务商 / 密钥与预算闸门；冻结基线见 [experiments/mvp_baseline.md](experiments/mvp_baseline.md)。
+> W1 全部、W2 全量、P0 实验记录体系、W2.5 校准，以及 W3 四条护栏、2×2 全因子、多种子稳健性检验、可达上限分析、分辨率审计、模型能力轴归因对照与 v2 扩展任务集分辨率实测已落地（护栏阶段收口）；W4 前置工程与首轮真实模型两格 A/B 已完成，结论为「两格 `pass^k` 均 0.00、探针 0 次拒绝、H1 未被检验」，详见 [experiments/w4_report.md](experiments/w4_report.md)；冻结基线见 [experiments/mvp_baseline.md](experiments/mvp_baseline.md)。
 
 | 阶段 | 交付 |
 | --- | --- |
@@ -286,7 +297,7 @@ W3 收口后路线表只剩 W4：接真实模型验证 `[GUARD-REJECT]` 能否�
 | W2 余项 | `ModelReply` 真实观测、条件话术、trace 首个偏离点归因与证据入库（已交付） |
 | W2.5 | `SeededBackend` 校准 `pass^k` 区分度，零成本、不接真实模型（已交付） |
 | W3 | 逐项修运行时，每组只改一个变量：`schema_validation` / `idempotency` 的 2×2 主效应 / 交互、30 个 seed 的稳健性检验、`tool_retry` 与 `json_recovery` 的跨 seed A/B，以及九格可达上限分析并收口、`pass^k` 分辨率与效应掩蔽审计、模型能力轴 × 护栏轴的 2×8 归因对照、v2 扩展任务集与分辨率实测（已交付）；上下文压缩 / 预算转到 W4 真实模型阶段 |
-| W4 | 真实模型验证 `[GUARD-REJECT]`（前置工程 / 预算闸门 / 纠正探针 / 跑批前离线预检已交付，首轮两格 A/B 待确认服务商与密钥）；其后 4–6 组单变量对照实验，出成功率 / 成本帕累托图 |
+| W4 | 真实模型验证 `[GUARD-REJECT]`（前置工程 / 预算闸门 / 纠正探针 / 离线预检 / 首轮两格 A/B 已交付，结论与边界见 [experiments/w4_report.md](experiments/w4_report.md)）；**首轮未验证 H1**，要检验需另开 W4-b 实验组给探针制造分母（见报告 §9），在此之前不扩「4–6 组单变量对照」、不做成本帕累托图 |
 | W5 | 服务化、并发、容器化、trace 回放、测试 |
 | W6 | 中文扩展任务集、结果表、复现文档 |
 

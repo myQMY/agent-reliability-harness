@@ -1,0 +1,1 @@
+{"config":{"backend":"openai","compare":"experiments/runs/w4_off_flash-61491decf48c/result_rows.jsonl","guards":["schema_validation","idempotency","tool_retry","json_recovery"],"k":3,"max_json_retries":2,"max_steps":12,"name":"w4_all4_flash","tasks":"tasks/mvp_10.jsonl"},"run_id":"w4_all4_flash-f6a4ea1674dc"}

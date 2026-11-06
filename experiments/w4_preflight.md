@@ -3,7 +3,7 @@
 > 由 `python -m eval.w4_preflight` 生成。**本命令不发起任何 API 请求、不花一分钱、不跑模型、不判分。**
 > 本文件是环境 / 配置状态快照，每次运行覆盖更新；**不属于冻结归档，也不是 W4 的实验结果**，不含任何模型分数、实测 token 或 latency。
 
-整体状态：**NOT READY — 等待外部输入**（0 FAIL / 2 BLOCKED / 10 PASS）
+整体状态：**READY**（0 FAIL / 0 BLOCKED / 12 PASS）
 
 | # | 检查项 | 状态 | 说明 |
 | --- | --- | --- | --- |
@@ -13,11 +13,11 @@
 | 4 | 护栏为唯一自变量（OFF 空 / ALL4 全开） | PASS | ALL4 = ['schema_validation', 'idempotency', 'tool_retry', 'json_recovery'] |
 | 5 | 两格 run_id 不同（留档不会互相覆盖） | PASS | w4_off_flash-61491decf48c / w4_all4_flash-f6a4ea1674dc |
 | 6 | ALL4.compare 精确指向同后端 OFF 留档 | PASS | experiments/runs/w4_off_flash-61491decf48c/result_rows.jsonl |
-| 7 | OFF 组留档已生成 | BLOCKED | `experiments/runs/w4_off_flash-61491decf48c/result_rows.jsonl` 不存在；按 §5 先跑对照组，再跑实验组 |
+| 7 | OFF 组留档已生成 | PASS | `experiments/runs/w4_off_flash-61491decf48c/result_rows.jsonl` 存在 |
 | 8 | 两格 results / traces 目录互不冲突 | PASS | off_results=results/w4_off / off_traces=traces/w4_off / on_results=results/w4_all4 / on_traces=traces/w4_all4 |
 | 9 | 任务集 mvp_10.jsonl sha256 未变 | PASS | 与守门测试钉死的常量一致 |
 | 10 | 任务集 mvp_30.jsonl sha256 未变 | PASS | 与守门测试钉死的常量一致 |
-| 11 | .env 已配置三个必需键 | BLOCKED | `.env` 不存在；复制 `.env.example` 并填 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL |
+| 11 | .env 已配置三个必需键 | PASS | 三个键均已设置（值不读取、不展示） |
 | 12 | 预算闸门覆盖单格上界 | PASS | 单格上界 360 次 / 612000 tokens；两格计划合计 720 次 / 1224000 tokens。 `--max-calls 720` 是**单次 eval.run** 的闸门，两格各自独立，合计硬上限 1440 次（不是总预算 720）。 |
 
 ## 预算作用域（最容易被读错的一条）
@@ -35,5 +35,4 @@
 
 ## 跑批前必须补齐
 
-- [BLOCKED] OFF 组留档已生成：`experiments/runs/w4_off_flash-61491decf48c/result_rows.jsonl` 不存在；按 §5 先跑对照组，再跑实验组
-- [BLOCKED] .env 已配置三个必需键：`.env` 不存在；复制 `.env.example` 并填 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL
+- 无。全部检查通过；按 `docs/w4-design.md` §5 执行命令。

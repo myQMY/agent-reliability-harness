@@ -1,11 +1,15 @@
 """W4 跑批前预检的守门测试：全部离线，零 API 请求、零花费。
 
 钉死四件事：
-1. 当前仓库状态下预检必须如实报 NOT READY，不许假装就绪；
+1. 外部输入缺失时预检必须如实报 NOT READY，不许假装就绪；
 2. 故意写坏配置（compare 失配 / 目录冲突 / 预算不足 / .env 缺键）必须被拦住；
 3. 密钥值绝不进入报告或 stdout；
 4. openai 后端缺少对照留档时，必须在读取密钥 / 发起调用之前就拒绝启动，
    而既有 scripted 路径不受这次改动影响。
+
+所有涉及「就绪 / 未就绪」的断言都用临时目录与 patch **自己构造状态**，
+不依赖本机此刻是否填了 `.env`、仓库里是否已有 OFF 组留档——W4 首轮
+跑批完成后这两项都会从「缺失」变成「已生成」，写死环境会让测试失真。
 """
 from __future__ import annotations
 
@@ -31,12 +35,24 @@ def current_checks(**kwargs):
 
 
 class TestPreflightHonestState(unittest.TestCase):
-    def test_current_repo_is_not_ready_and_has_no_failures(self):
-        # 显式指向一个不存在的 .env，避免本测试依赖本机是否已填密钥
+    def test_absent_external_inputs_are_waiting_not_errors(self):
+        # 两项外部输入都显式隔离：.env 指向不存在的路径，OFF 留档解析到
+        # 临时目录里的空路径。这样无论真实仓库是否已跑过 W4，本测试都在
+        # 验证同一件事：缺输入 = BLOCKED，不是 FAIL。
         with TemporaryDirectory() as d:
-            checks, _ = current_checks(
-                env_file=Path(d) / "absent.env", max_calls=720
-            )
+            base = Path(d)
+
+            def fake_resolve(path_str: str) -> Path:
+                if path_str.startswith("experiments/runs/"):
+                    return base / "absent_archive.jsonl"
+                return ROOT / path_str
+
+            with patch.object(
+                preflight.exp_config, "resolve_input", side_effect=fake_resolve
+            ):
+                checks, _ = current_checks(
+                    env_file=base / "absent.env", max_calls=720
+                )
         self.assertEqual(preflight.overall(checks), "NOT READY — 等待外部输入")
         self.assertFalse(any(item.status == preflight.FAIL for item in checks))
         blocked = [item.name for item in checks if item.status == preflight.BLOCKED]
@@ -46,9 +62,11 @@ class TestPreflightHonestState(unittest.TestCase):
     def test_report_states_it_made_no_request_and_no_claim_about_results(self):
         checks, ctx = current_checks(max_calls=720)
         report = preflight.render_report(checks, ctx)
+        # 不断言具体状态（READY 会随外部输入变化），只断言报告如实写出
+        # 状态、三态口径，且明确声明自己不是实验结果。
         for phrase in (
             "不发起任何 API 请求", "不花一分钱", "不是 W4 的实验结果",
-            "不属于冻结归档", "NOT READY", "单格不失控",
+            "不属于冻结归档", "整体状态：", "三态口径", "单格不失控",
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, report)
@@ -77,10 +95,16 @@ class TestPreflightHonestState(unittest.TestCase):
 
     def test_strict_returns_nonzero_while_not_ready(self):
         with TemporaryDirectory() as d:
-            out = Path(d) / "preflight.md"
+            base = Path(d)
+            out = base / "preflight.md"
+            # 显式指向不存在的 .env，让「未就绪」成为测试自己构造的状态，
+            # 而不是依赖本机密钥 / 归档的当前状态。
             buf = io.StringIO()
             with redirect_stdout(buf):
-                code = preflight.main(["--strict", "--out", str(out)])
+                code = preflight.main(
+                    ["--strict", "--out", str(out),
+                     "--env-file", str(base / "absent.env")]
+                )
             self.assertEqual(code, 1)
             self.assertIn("NOT READY", buf.getvalue())
             self.assertIn("未发起任何 API 请求", buf.getvalue())
@@ -183,31 +207,46 @@ class TestPreflightCatchesBrokenConfig(unittest.TestCase):
                 checks, ctx = current_checks(
                     on_config=on_path, env_file=env, max_calls=720
                 )
-            self.assertEqual(preflight.overall(checks), "READY")
-            report = preflight.render_report(checks, ctx)
-            self.assertNotIn(SECRET, report)
-            self.assertNotIn(SECRET, preflight.render_report(checks, ctx))
+                self.assertEqual(preflight.overall(checks), "READY")
+                report = preflight.render_report(checks, ctx)
+                self.assertNotIn(SECRET, report)
 
-            buf = io.StringIO()
-            with redirect_stdout(buf):
-                code = preflight.main(
-                    ["--strict", "--out", str(base / "report.md"),
-                     "--env-file", str(env)]
-                )
-            # 真实仓库里 OFF 留档仍未生成，严格模式应当如实拦住
-            self.assertEqual(code, 1)
+                # 同一隔离状态下 strict 应放行；密钥值仍不得进入 stdout / 报告。
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    code = preflight.main(
+                        ["--strict", "--out", str(base / "report.md"),
+                         "--env-file", str(env), "--on-config", str(on_path)]
+                    )
+            self.assertEqual(code, 0)
             self.assertNotIn(SECRET, buf.getvalue())
+            self.assertNotIn(
+                SECRET, (base / "report.md").read_text(encoding="utf-8")
+            )
 
 
 class TestRunRejectsMissingCompareBeforeSpending(unittest.TestCase):
     def test_openai_run_stops_before_reading_credentials(self):
-        argv = ["--config", str(ROOT / "experiments" / "w4_all4_flash.toml")]
-        with patch.object(
-            cli, "config_from_env",
-            side_effect=AssertionError("不该在对照缺失时读取密钥"),
-        ):
-            with self.assertRaises(SystemExit) as caught:
-                cli.main(argv)
+        # 用隔离配置把 compare 指向不存在的文件，不依赖仓库里 OFF 留档
+        # 是否已经生成（首轮跑批后它已存在）。
+        with TemporaryDirectory() as d:
+            cfg = Path(d) / "missing_compare.toml"
+            cfg.write_text(
+                (ROOT / "experiments" / "w4_all4_flash.toml")
+                .read_text(encoding="utf-8")
+                .replace(
+                    "compare = \"experiments/runs/w4_off_flash-61491decf48c/result_rows.jsonl\"",
+                    "compare = \"experiments/runs/absent-for-test/result_rows.jsonl\"",
+                ),
+                encoding="utf-8",
+            )
+            argv = ["--config", str(cfg)]
+            with patch.object(
+                cli, "config_from_env",
+                side_effect=AssertionError("不该在对照缺失时读取密钥"),
+            ):
+                with self.assertRaises(SystemExit) as caught:
+                    cli.main(argv)
         message = str(caught.exception)
         self.assertIn("对照组结果行不存在", message)
         self.assertIn("未发起任何模型调用", message)
