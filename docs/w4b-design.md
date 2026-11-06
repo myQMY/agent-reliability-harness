@@ -1,8 +1,9 @@
 # W4-b 设计：给真实模型路径接上输出级故障注入，检验 H1
 
-> 状态：**用户已于 2026-11-06 确认 `experiments/w4_report.md` §9 的选项 A**。
-> 本文是 W4-b 的范围共识、注入口径与执行清单；装置校准已离线完成，
-> 两格真实跑批与结论见 `experiments/w4b_report.md`（跑完后生成）。
+> 状态：**用户已于 2026-11-06 确认 `experiments/w4_report.md` §9 的选项 A，
+> W4-b 两格真实跑批已完成**。本文是 W4-b 的范围共识、注入口径与执行清单；
+> 装置校准已离线完成，实测结论见
+> [experiments/w4b_report.md](../experiments/w4b_report.md)。
 > W4 首轮的设计与结论见 [w4-design.md](w4-design.md) 与
 > [experiments/w4_report.md](../experiments/w4_report.md)，**不回溯改写**。
 
@@ -228,9 +229,9 @@ python -m unittest discover -s tests -v
 | --- | --- |
 | 本文（范围与口径） | `docs/w4b-design.md` |
 | 装置离线校准 | `experiments/w4b_probe_dryrun.md` |
-| 跑批前预检状态快照 | `experiments/w4b_preflight.md` |
+| 跑批前预检状态快照（READY） | `experiments/w4b_preflight.md` |
 | 两格配置 | `experiments/w4b_off_flash.toml`、`experiments/w4b_all4_flash.toml` |
 | 注入器实现 | `runtime/model.py` 的 `OutputFaultBackend` 及共享 `fault_rng` / `pick_fault` / `fault_text` |
-| 守门测试 | `tests/test_w4b_injection.py` |
-| 实测结论（跑批后） | `experiments/w4b_report.md` |
-| 纠正探针（跑批后） | `experiments/w4b_probe.md` |
+| 守门测试 | `tests/test_w4b_injection.py`、`tests/test_w4b_results.py` |
+| 实测结论 | `experiments/w4b_report.md` |
+| 纠正探针（实测） | `experiments/w4b_probe.md` |

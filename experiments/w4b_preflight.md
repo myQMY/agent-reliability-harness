@@ -3,7 +3,7 @@
 > 由 `python -m eval.w4_preflight` 生成。**本命令不发起任何 API 请求、不花一分钱、不跑模型、不判分。**
 > 本文件是环境 / 配置状态快照，每次运行覆盖更新；**不属于冻结归档，也不是 W4 的实验结果**，不含任何模型分数、实测 token 或 latency。
 
-整体状态：**NOT READY — 等待外部输入**（0 FAIL / 1 BLOCKED / 11 PASS）
+整体状态：**READY**（0 FAIL / 0 BLOCKED / 12 PASS）
 
 | # | 检查项 | 状态 | 说明 |
 | --- | --- | --- | --- |
@@ -13,7 +13,7 @@
 | 4 | 护栏为唯一自变量（OFF 空 / ALL4 全开） | PASS | ALL4 = ['schema_validation', 'idempotency', 'tool_retry', 'json_recovery'] |
 | 5 | 两格 run_id 不同（留档不会互相覆盖） | PASS | w4b_off_flash-f6e556cd7201 / w4b_all4_flash-6d7222dc87af |
 | 6 | ALL4.compare 精确指向同后端 OFF 留档 | PASS | experiments/runs/w4b_off_flash-f6e556cd7201/result_rows.jsonl |
-| 7 | OFF 组留档已生成 | BLOCKED | `experiments/runs/w4b_off_flash-f6e556cd7201/result_rows.jsonl` 不存在；按 §5 先跑对照组，再跑实验组 |
+| 7 | OFF 组留档已生成 | PASS | `experiments/runs/w4b_off_flash-f6e556cd7201/result_rows.jsonl` 存在 |
 | 8 | 两格 results / traces 目录互不冲突 | PASS | off_results=results/w4b_off / off_traces=traces/w4b_off / on_results=results/w4b_all4 / on_traces=traces/w4b_all4 |
 | 9 | 任务集 mvp_10.jsonl sha256 未变 | PASS | 与守门测试钉死的常量一致 |
 | 10 | 任务集 mvp_30.jsonl sha256 未变 | PASS | 与守门测试钉死的常量一致 |
@@ -35,4 +35,4 @@
 
 ## 跑批前必须补齐
 
-- [BLOCKED] OFF 组留档已生成：`experiments/runs/w4b_off_flash-f6e556cd7201/result_rows.jsonl` 不存在；按 §5 先跑对照组，再跑实验组
+- 无。全部检查通过；按 `docs/w4-design.md` §5 执行命令。
