@@ -1,7 +1,9 @@
 # MVP 任务集
 
-`mvp_10.jsonl` 是 10 条自建最小任务，每行一个 JSON 对象。任务集是**测量标尺**，
-不是被测对象；被测量和改进的是 `runtime/` 与 `eval/` 这条链路。
+`mvp_10.jsonl` 是 10 条自建最小任务，`mvp_30.jsonl` 是 W3 收口后新增的
+**v2 扩展测量标尺**（前 10 行逐字节沿用 `mvp_10.jsonl`，另加 20 条独立任务）。
+每行一个 JSON 对象。任务集是**测量标尺**，不是被测对象；被测量和改进的是
+`runtime/` 与 `eval/` 这条链路。两个文件都是版本化 fixture，一经提交不得修改。
 
 ## 字段
 
@@ -70,3 +72,55 @@ python -m eval.run --tasks tasks/mvp_10.jsonl --k 3
 `experiments/runs/<run_id>/report.md` 与同目录 `config.json`（报告与生效配置快照）。
 前两者不入库，留档报告入库。`experiments/mvp_baseline.md` 是 W1 冻结基线，只读，
 任何运行都不会覆盖；详见 [README.md](../README.md)。
+
+## v2 扩展任务集 `mvp_30.jsonl`
+
+[分辨率审计](../experiments/w3_resolution.md) 证明 `passk = passk_hits / task_count`，
+分辨率恒为 1/N、与 k 无关；而 10 条任务里 7 条是脚本固有缺陷任务，在任何 seed、
+任何护栏组合下都恒失败、**不携带信息**，这把尺子实际只有 0.00~0.30 共 4 档。
+真正变细只能新增独立任务，不能靠提高 k，也不能把固有缺陷从分母里剔除
+（那只会让步进变粗，且等于人为挑选样本）。
+
+### 构造规则
+
+- **前 10 行逐字节取自 `mvp_10.jsonl`**，7 条固有缺陷任务一个都没剔除；
+  它们既是归因分层的重要样本，也保证与既有留档可比。
+- 后 20 行是 `T11`~`T30`，**脚本全部正确**（没有坏 JSON / 错工具 / 缺参数 /
+  超退 / 死循环）。理由不是「让数字好看」：恒失败任务再复制一批只会让分母
+  变大、名义步进变细，可达动态范围却不变。正确脚本让成败只由「注入故障
+  是否被护栏恢复」决定，因此每条都是真正携带信息的独立测量位点。
+- 20 条覆盖 3 笔订单、2 位客户、不同退款金额、单轮与多轮、读 / 退款 / 取消
+  三类动作，脚本长度 2~5 步不等（= 不同数量的故障注入 cursor）。
+- 每条任务复用同一份 `initial_db` 快照，但每个 trial 独立 `reset`；`task_id`
+  进入 `SeededBackend` 的 SHA256 RNG 派生，随机流彼此独立。
+- `target_db` 只写发生变化的行，只读任务写 `{}`；`policy_checks` 与
+  `required_disclosures` 沿用同类既有任务的口径，**判分逻辑一个字都没改**。
+
+### 生成器
+
+`build_mvp_30.py` 是**设计期工具**，不是运行时依赖：它只读 `mvp_10.jsonl` 与
+硬编码的规格表，`--check` 只做只读一致性校验，不写文件。
+
+```
+python tasks/build_mvp_30.py --check
+```
+
+`mvp_30.jsonl` 是**版本化 fixture，一经提交不得再生成或修改**。守门测试钉死：
+前 10 行逐字节等于 `mvp_10.jsonl`、30 行且 ID 唯一、20 条新任务在
+`ScriptedBackend` 下 k 次全部通过（证明脚本 / `target_db` / 判分三者一致），
+以及生成规则与产物逐字节一致。
+
+### 纪律与边界
+
+- **既有全部 W3 留档、实验配置与分析模块仍指向 `mvp_10.jsonl`**，一个都没改；
+  `robustness.py` / `ceiling.py` / `resolution.py` / `attribution.py` 的版本化
+  常量原样保留，两组数字不可混用、不可拼接成一条曲线。
+- **任务集是第三个自变量**。两个任务集的 `pass^k` 分母与任务构成都不同，
+  跨任务集的数值对比只描述分辨率属性，**不是「护栏效应变大」的因果结论**；
+  单变量因果证据仍以 `experiments/w3_robustness.md` 与各 `*_sweep.md` 为准。
+- 新任务脚本正确 ≠ 任务更容易；`pass^k` 仍是二值化指标，步进变细不等于
+  效应量变连续，k 次全过的门槛仍在。
+- 全程确定性模拟器，不外推真实模型、不构成成本 / 延迟结论。
+
+完整对照证据与口径边界见 [experiments/w3_taskset_scale.md](../experiments/w3_taskset_scale.md)，
+跑法：`python -m eval.taskset_scale`。
