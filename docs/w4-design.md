@@ -59,7 +59,12 @@ W4 只验证一条机制假设，不追求「又涨了多少分」：
   读到错的那一组。两个目录都在 `.gitignore` 的 `/traces/` 之下，不污染仓库。
 - `run_id` 摘要不含模型名 / 单价 / 预算（它们不是实验自变量）。**换模型必须
   同时改 `name`**（例如 `w4_off_qwen`），否则新结果会覆盖同一 `run_id` 的报告；
-  `compare` 路径也要跟着改。
+  `compare` 路径也要跟着改。这条硬编码字符串由 `eval/w4_preflight.py` 按 OFF 组
+  `run_id` 机器校验：改了 `name` 却忘了同步 `compare`，预检直接报 FAIL。
+- `eval.run` 在 `openai` 后端下若找不到 `compare` 指向的对照留档，会**在读取密钥、
+  发起任何模型调用之前**拒绝启动。过去这里是静默跳过，会产出一份没有
+  「与对照组对照（A/B）」表却返回 0 的报告——W4 的结论恰恰来自那张表，
+  这比跑失败更危险。仅离线调试协议时可用 `--allow-missing-compare` 显式跳过。
 
 主指标 `pass^k`（分辨率仍是 1/10 = 0.10，与 W3 一致）；辅助观测 token、
 latency、`invalid_calls`、纠正探针的四态分布。`pass^k` 仍是二值化指标，
@@ -95,8 +100,19 @@ completion tokens 的假设，产出 [experiments/w4_budget_estimate.md](../expe
 
 **结论：W4 首轮实验的量级是几元到十几元人民币，不是需要立项审批的开支。**
 真正需要用户决定的只有两件事：用哪家 / 哪个模型，以及是否愿意提供 API key。
-按 3× 安全余量，建议 A 档闸门：`--max-calls 720`、`--max-total-tokens 3000000`、
-`--max-cost 2.0 USD`（≈¥14.4，约为最保守情景的 1.7 倍）。
+
+**闸门作用域（最容易被读错的一条）**：上表的 720 是**两格合计**的计划上界；
+而 `--max-calls` 作用于**单次 `eval.run`**，两格是两次独立进程、各持一份
+`BudgetLedger`。单格上界 = 10 × 3 × 12 = **360 次 / 612,000 tokens**，所以按
+§5 给每格 `--max-calls 720` 时，两格合计硬上限是 **1440 次**，不是「整轮
+总预算 720」。闸门保证的是「单格不失控」，不是「整轮不超某个总额」；若要
+把整轮卡在 720，应给每格 360（但那样就没有步数波动的余量了）。按 off-peak
+单价，两格各 $0.2484、合计 $0.4968，仍远低于 `--max-cost 2.0`，因此首轮
+保留 2× 余量是安全的。这段口径由 `eval/w4_preflight.py` 机器校验，不靠人记。
+
+建议 A 档闸门：`--max-calls 720`、`--max-total-tokens 3000000`、
+`--max-cost 2.0 USD`（≈¥14.4，约为最保守情景的 1.7 倍；`max_total_tokens`
+同样是**单格**上限，为 612,000 的约 4.9 倍）。
 
 口径：估算用上界不是预测；`avg_prompt` / `avg_completion` 是假设不是实测；
 thinking mode 的 reasoning tokens 计入 output 计费；缓存命中可能降低 input
@@ -112,6 +128,12 @@ thinking mode 的 reasoning tokens 计入 output 计费；缓存命中可能降�
 #    DeepSeek:  https://api.deepseek.com  +  deepseek-flash
 #    百炼:      https://dashscope.aliyuncs.com/compatible-mode/v1  +  qwen-plus
 
+# 0.5) 离线预检：零 API 请求、零花费，把执行清单里靠人肉记住的约束
+#    变成机器校验（单变量 / compare 链接 / 目录冲突 / fixture 哈希 / 预算作用域）。
+#    此时应报 0 FAIL；BLOCKED 是「还没轮到」的外部输入，不是错误。
+python -m eval.w4_preflight --max-calls 720 --max-total-tokens 3000000 \
+  --price-in 0.15 --price-out 0.6 --currency USD
+
 # 1) 离线上算，确认上界（不联网、不花钱）
 python -m eval.budget --tasks tasks/mvp_10.jsonl --k 3 --cells 2 \
   --price-in 0.15 --price-out 0.6 --currency USD
@@ -121,6 +143,11 @@ python -m eval.run --config experiments/w4_off_flash.toml \
   --max-calls 720 --max-total-tokens 3000000 \
   --price-in 0.15 --price-out 0.6 --currency USD --max-cost 2.0 \
   --traces-dir traces/w4_off --results-dir results/w4_off
+
+# 2.5) ALL4 开跑前再预检一次：OFF 留档与 .env 都已到位，整体应为 READY。
+#     --strict 下非 READY 返回非零退出码，可直接串进脚本；任何 FAIL 先修再跑。
+python -m eval.w4_preflight --strict --max-calls 720 \
+  --max-total-tokens 3000000 --price-in 0.15 --price-out 0.6 --currency USD
 
 # 3) 实验组 ALL4（compare 已指向第 2 步的留档）
 python -m eval.run --config experiments/w4_all4_flash.toml \
@@ -165,6 +192,7 @@ python -m unittest discover -s tests -v
 
 | 情况 | 动作 |
 | --- | --- |
+| 预检报 FAIL，或整体非 READY | 先修配置 / 补齐输入；**不许**带着 `--allow-missing-compare` 跑正式实验 |
 | 预算闸门触发 | 立即停，核对累计用量；**不擅自提额重跑**，先确认原因 |
 | 大量 400 / 401 / 超时 | 先修接口与凭据，不要把请求失败算进通过率或纠正率 |
 | 两格 `pass^k` 都接近 0 | 说明任务 / 上下文不可解，先诊断提示与工具协议，**不要靠加护栏刷分** |

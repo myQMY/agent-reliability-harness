@@ -151,7 +151,7 @@ W4 若做框架对照，应作为**独立 backend / loop 实现**并列接入，
 | P0 | 实验配置版本化、`run_id` 留档、冻结基线与报告 diff（已交付） | `Backend` 接口、判分口径、trace 格式 |
 | W2.5 | `SeededBackend` 校准 `pass^k` 区分度：零成本、零依赖、确定性伪随机、预留护栏拒绝协议（已交付） | 默认 `run_id`、默认配置快照、冻结基线三件、默认 scripted 的全部测量指标 |
 | W3 | 逐项加护栏、一次只改一个变量：`schema_validation` / `idempotency` 的 2×2 全因子、`tool_retry` / `json_recovery` 的跨 seed A/B、30 个 seed 稳健性检验、九格可达上限分析、`pass^k` 分辨率审计、模型能力轴 × 护栏轴归因对照与 v2 扩展任务集分辨率实测（已交付，护栏阶段收口）；上下文压缩 / token 与步数预算须等 W4 真实模型阶段才有可观测输入 | 判分口径、trace 的 8 字段、冻结基线三件、既有 7 个 `run_id` / 快照、既有归档报告与全部汇总报告 |
-| W4 | 前置已交付：`OpenAIBackend` 工具上下文 + `role=tool` 规范化、`eval/budget.py` 离线上界与硬闸门、`eval/guard_probe.py` 纠正探针离线校准、两格版本化 A/B 配置；真实模型跑批待确认服务商 / 密钥，其后多组单变量对照实验与结果表、帕累托图 | 判分口径、trace 的 8 字段、两个已提交任务集、既有全部 `run_id` / 快照与归档报告 |
+| W4 | 前置已交付：`OpenAIBackend` 工具上下文 + `role=tool` 规范化、`eval/budget.py` 离线上界与硬闸门、`eval/guard_probe.py` 纠正探针离线校准、`eval/w4_preflight.py` 跑批前 12 项离线预检（含 `compare` 链接与预算作用域机器校验）、`eval.run` 对照留档缺失时提前拒绝、两格版本化 A/B 配置；真实模型跑批待确认服务商 / 密钥，其后多组单变量对照实验与结果表、帕累托图 | 判分口径、trace 的 8 字段、两个已提交任务集、既有全部 `run_id` / 快照与归档报告 |
 | W5 | runner 并发化（IO 已收敛）、FastAPI + 读 JSONL 的静态回放页、容器化 | 循环与判分逻辑 |
 | W6 | 中文扩展任务集与复现文档 | 上述全部 |
 

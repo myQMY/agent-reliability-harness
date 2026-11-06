@@ -72,6 +72,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--price-in", type=float, default=None)
     parser.add_argument("--price-out", type=float, default=None)
     parser.add_argument("--currency", default=None)
+    # W4：openai 后端声明了对照组却找不到留档时，默认直接拒绝启动。
+    # 过去的静默跳过会产出一份没有「与对照组对照（A/B）」表的报告，
+    # 而 W4 的结论恰恰来自那张表——比跑失败更危险。
+    parser.add_argument(
+        "--allow-missing-compare", action="store_true",
+        help="仅 openai 离线调试协议时允许对照组留档缺失；正常跑批不要用",
+    )
     return parser
 
 
@@ -96,6 +103,19 @@ def main(argv: list[str] | None = None) -> int:
         guards=merged_guards,
     )
     rid = exp_config.run_id(cfg)
+
+    # 必须在构造后端 / 产生任何模型调用之前检查：真实模型跑批一旦开跑就
+    # 开始计费，事后再发现对照缺失已经晚了。只在 openai 后端生效，
+    # 既有 scripted / seeded 路径与归档逐字节不变。
+    if cfg.backend == "openai" and cfg.compare and not args.allow_missing_compare:
+        compare_path = exp_config.resolve_input(cfg.compare)
+        if not compare_path.is_file():
+            raise SystemExit(
+                f"对照组结果行不存在：{cfg.compare}。W4 的结论来自两格 A/B，"
+                "请先按 docs/w4-design.md §5 跑完 OFF 组，并核对 compare 路径"
+                "与该组 run_id 一致。本次未发起任何模型调用、未产生费用。"
+                "仅离线调试接口协议时可用 --allow-missing-compare 显式跳过。"
+            )
 
     budget_limit: budget.BudgetLimit | None = None
     budget_args = (

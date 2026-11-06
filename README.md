@@ -264,6 +264,10 @@ W3 收口后路线表只剩 W4：接真实模型验证 `[GUARD-REJECT]` 能否�
 
 **预算结论（判断先行）**：`python -m eval.budget` 按 DeepSeek 官方 off-peak 标价（$0.15 / $0.6 每百万 tokens）算出首轮 `mvp_10` × k=3 × 2 格的**调用次数上界 720 次、费用上界 $0.2484 ≈ ¥1.79**；把 peak 时段翻倍和 thinking mode 1000 output/次都叠上的最保守情景也只到 **$1.1880 ≈ ¥8.55**。证据见 [experiments/w4_budget_estimate.md](experiments/w4_budget_estimate.md)。所以卡点根本不是钱，只有两件事要定：**用哪家 / 哪个模型，以及是否愿意提供 API key**。闸门把预算变成命令行的硬约束——`python -m eval.run --backend openai` 不显式给 `--max-calls` 会直接拒绝启动，超限调用前抛 `BudgetExceeded` 停止。单价全部由命令行注入，本仓库不硬编码任何服务商价格（第三方聚合站的报价互相矛盾，只采信官方定价页，且价格会变）。
 
+**预算闸门的作用域不能读错**：上表的 720 是**两格合计**的计划上界，而 `--max-calls` 作用于**单次 `eval.run`**。单格上界是 360 次 / 612,000 tokens，两格是两次独立进程、各持一份账本，所以给每格 720 时合计硬上限是 **1440 次**，闸门保证的是「单格不失控」，不是「整轮不超某个总额」（设计文档 §4）。
+
+**跑批前的机器预检**：`python -m eval.w4_preflight` 零 API 请求、零花费，把执行清单里原本靠人肉记住的约束变成 12 项校验——单变量、`compare` 硬编码字符串与 OFF 组 `run_id` 是否对得上、两格 trace 目录是否冲突、两个任务集 sha256、`.env` 三个键、预算闸门是否覆盖单格上界。结果分 `PASS` / `FAIL`（配置写错）/ `BLOCKED`（外部输入没到位）三态，`--strict` 下未就绪返回非零退出码；[experiments/w4_preflight.md](experiments/w4_preflight.md) 是**状态快照，不是实验结果**。同时 `eval.run` 在 `openai` 后端下若找不到对照留档，会**在读取密钥、发起任何调用之前**拒绝启动——过去这里是静默跳过，会产出一份没有 A/B 对照表却返回 0 的假报告，而 W4 的结论恰恰来自那张表。当前预检如实报 **0 FAIL / 2 BLOCKED / NOT READY**（`.env` 与 OFF 组留档尚未生成）。
+
 `[GUARD-REJECT]` 的尺子也先离线校准了：`python -m eval.guard_probe` 用 `SeededBackend` 跑 OFF / 四条全开两格，OFF 组数到 **0** 次拒绝，全开组数到 **7** 次拒绝、其中 **4** 次 responsive，四类护栏都能分别归类（证据 [experiments/w4_probe_dryrun.md](experiments/w4_probe_dryrun.md)）。**这只证明探针数得对，不是 W4 的实验结论**——模拟器的 `_pending_correct` 是硬编码重发，它当然「读得懂」。探针把拒绝后的下一次输出分成 `no_reply` / `unparseable` / `repeated` / `responsive` 四态；responsive 只是**输出层面的机制证据**，不是任务成功、不是护栏有效，论效果仍然只认 `pass^k`。W4 跑完可用 `--traces-dir` 只读复用同一把尺子。
 
 **口径边界比数字更重要**：W3 的 7 条「脚本固有缺陷」是 `ScriptedBackend` / `SeededBackend` **脚本的属性**，真实模型根本不读脚本；W3 的 0.1433 / 0.3000、可达上限 0.30、`fpm` 模型能力轴在 W4 全部失效，W4 还多了一个 system prompt 自变量。因此 W3 与 W4 的数字**不可混用、不可拼成一条曲线**，W4 的因果结论只能来自同模型同配置下的两格内部 A/B。`temperature=0` 也不等于逐字节可复现。若实验组 responsive 接近 0，就触发设计文档里写死的可证伪条件：W3 机制不得外推，应改协议而不是调文案。
@@ -282,7 +286,7 @@ W3 收口后路线表只剩 W4：接真实模型验证 `[GUARD-REJECT]` 能否�
 | W2 余项 | `ModelReply` 真实观测、条件话术、trace 首个偏离点归因与证据入库（已交付） |
 | W2.5 | `SeededBackend` 校准 `pass^k` 区分度，零成本、不接真实模型（已交付） |
 | W3 | 逐项修运行时，每组只改一个变量：`schema_validation` / `idempotency` 的 2×2 主效应 / 交互、30 个 seed 的稳健性检验、`tool_retry` 与 `json_recovery` 的跨 seed A/B，以及九格可达上限分析并收口、`pass^k` 分辨率与效应掩蔽审计、模型能力轴 × 护栏轴的 2×8 归因对照、v2 扩展任务集与分辨率实测（已交付）；上下文压缩 / 预算转到 W4 真实模型阶段 |
-| W4 | 真实模型验证 `[GUARD-REJECT]`（前置工程 / 预算闸门 / 纠正探针已交付，首轮两格 A/B 待确认预算与密钥）；其后 4–6 组单变量对照实验，出成功率 / 成本帕累托图 |
+| W4 | 真实模型验证 `[GUARD-REJECT]`（前置工程 / 预算闸门 / 纠正探针 / 跑批前离线预检已交付，首轮两格 A/B 待确认服务商与密钥）；其后 4–6 组单变量对照实验，出成功率 / 成本帕累托图 |
 | W5 | 服务化、并发、容器化、trace 回放、测试 |
 | W6 | 中文扩展任务集、结果表、复现文档 |
 
