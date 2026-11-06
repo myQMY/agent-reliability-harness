@@ -2,7 +2,7 @@
 
 面向多轮工具调用 Agent 的可靠性评测与运行时平台。
 
-> 状态：W1 全部、W2 全量（判分 / trace / 真实模型观测 / 条件话术 / trace 归因）、P0 实验记录体系、W2.5 测量链路校准，以及 W3 四条护栏（`schema_validation` / `idempotency` / `tool_retry` / `json_recovery`）的单变量 A/B、2×2 全因子、多种子稳健性检验、可达上限分析、`pass^k` 分辨率与效应掩蔽审计、模型能力轴 × 护栏轴归因对照，以及 v2 扩展任务集与分辨率实测对照已落地；W4 前置工程与**首轮真实模型两格 A/B 已完成**（DeepSeek `deepseek-flash`，182 次真实调用）。首轮两格 `pass^k` 均为 0.00、纠正探针两组均 0 次拒绝，**H1 未被检验而非被证伪**；完整结论、三层根因与口径边界见 [experiments/w4_report.md](experiments/w4_report.md)。**W3 数字不得外推到真实模型，两组结果不可拼曲线。** 用户确认选项 A 后已另开 **W4-b**（`OutputFaultBackend` 给 `openai` 后端接上与 W3 同源的输出级故障注入，`fpm=300`）：ALL4 组 **17 次拒绝 / 17 次 responsive**，H1 在**输出层**得到支持，但两格 `pass^k` 仍 0.00、护栏效果仍不可测，且**输出被注入扰动、不是纯净模型行为**；见 [experiments/w4b_report.md](experiments/w4b_report.md)。本文件不写任何未经验证的结论；所有指标以 `experiments/` 下可复现的结果为准。
+> 状态：W1 全部、W2 全量（判分 / trace / 真实模型观测 / 条件话术 / trace 归因）、P0 实验记录体系、W2.5 测量链路校准，以及 W3 四条护栏（`schema_validation` / `idempotency` / `tool_retry` / `json_recovery`）的单变量 A/B、2×2 全因子、多种子稳健性检验、可达上限分析、`pass^k` 分辨率与效应掩蔽审计、模型能力轴 × 护栏轴归因对照，以及 v2 扩展任务集与分辨率实测对照已落地；W4 前置工程与**首轮真实模型两格 A/B 已完成**（DeepSeek `deepseek-flash`，182 次真实调用）。首轮两格 `pass^k` 均为 0.00、纠正探针两组均 0 次拒绝，**H1 未被检验而非被证伪**；完整结论、三层根因与口径边界见 [experiments/w4_report.md](experiments/w4_report.md)。**W3 数字不得外推到真实模型，两组结果不可拼曲线。** 用户确认选项 A 后已另开 **W4-b**（`OutputFaultBackend` 给 `openai` 后端接上与 W3 同源的输出级故障注入，`fpm=300`）：ALL4 组 **17 次拒绝 / 17 次 responsive**，H1 在**输出层**得到支持，但两格 `pass^k` 仍 0.00、护栏效果仍不可测，且**输出被注入扰动、不是纯净模型行为**；见 [experiments/w4b_report.md](experiments/w4b_report.md)。用户随后确认「继续补只读证据」并另开 **W4-c**：注入器把被替换掉的干净动作写进独立只读 side-car（绝不回灌给模型），15 个可比事件里 **14 次重回同一个合法调用**、`missing=0`，开放项在输出层可判定；但这是**同策略复算、不是理解**，两格 `pass^k` 仍 0.00、护栏效果仍不可测，见 [experiments/w4c_report.md](experiments/w4c_report.md)。本文件不写任何未经验证的结论；所有指标以 `experiments/` 下可复现的结果为准。
 
 ## 为什么做这个
 
@@ -26,8 +26,8 @@ Agent demo 和能稳定运行的 Agent 之间，差的通常不是模型能力�
 | `runtime/` | 自研薄运行时：循环、护栏、上下文与预算管理 |
 | `eval/` | 用户模拟器、批量执行器、终态判分、归因分析、CLI |
 | `web/` | trace 回放与实验对照面板（W5） |
-| `docs/` | 产品设计与技术实现方案；W4 真实模型实验设计见 [docs/w4-design.md](docs/w4-design.md)，W4-b 注入实验设计见 [docs/w4b-design.md](docs/w4b-design.md) |
-| `experiments/` | 版本化实验配置（`config.toml` / `calibration.toml` / `guard_ab_*.toml` / `w4_*_flash.toml`）、冻结基线、按 `run_id` 留档的报告与结果行、`w3_guard_matrix.md` 因子汇总、`w3_robustness.md` 多种子稳健性检验、`w3_tool_retry_sweep.md` / `w3_json_recovery_sweep.md` 跨 seed A/B、`w3_ceiling.md` 可达上限分析、`w3_resolution.md` 分辨率与效应掩蔽审计、`w3_attribution.md` 模型能力轴归因对照、`w3_taskset_scale.md` v2 扩展任务集分辨率实测、`w4_budget_estimate.md` 离线上界、`w4_probe_dryrun.md` 探针校准、`w4_preflight.md` 跑批前就绪快照、**W4 首轮实测** `w4_report.md` 结论报告与 `w4_probe.md` 只读探针结果、**W4-b 装置** `w4b_*_flash.toml` 两格配置、`w4b_probe_dryrun.md` 离线装置校准、`w4b_preflight.md` 就绪快照、**W4-b 实测** `w4b_report.md` 结论报告与 `w4b_probe.md` 只读探针结果 |
+| `docs/` | 产品设计与技术实现方案；W4 真实模型实验设计见 [docs/w4-design.md](docs/w4-design.md)，W4-b 注入实验设计见 [docs/w4b-design.md](docs/w4b-design.md)，W4-c 只读证据设计见 [docs/w4c-design.md](docs/w4c-design.md) |
+| `experiments/` | 版本化实验配置（`config.toml` / `calibration.toml` / `guard_ab_*.toml` / `w4*_flash.toml`）、冻结基线、按 `run_id` 留档的报告与结果行、`w3_guard_matrix.md` 因子汇总、`w3_robustness.md` 多种子稳健性检验、`w3_tool_retry_sweep.md` / `w3_json_recovery_sweep.md` 跨 seed A/B、`w3_ceiling.md` 可达上限分析、`w3_resolution.md` 分辨率与效应掩蔽审计、`w3_attribution.md` 模型能力轴归因对照、`w3_taskset_scale.md` v2 扩展任务集分辨率实测、`w4_budget_estimate.md` 离线上界、`w4_probe_dryrun.md` 探针校准、`w4_preflight.md` 跑批前就绪快照、**W4 首轮实测** `w4_report.md` 结论报告与 `w4_probe.md` 只读探针结果、**W4-b** `w4b_*_flash.toml` 两格配置、`w4b_probe_dryrun.md` 离线装置校准、`w4b_preflight.md` 就绪快照、`w4b_report.md` 结论报告与 `w4b_probe.md` 只读探针结果、**W4-c** `w4c_*_flash.toml` 两格配置、`w4c_probe_dryrun.md` 离线校准、`w4c_preflight.md` 就绪快照、`w4c_report.md` 结论报告与 `w4c_probe.md` 只读判定结果 |
 | `tests/` | 单元测试与回归用例 |
 | `traces/`, `results/` | 运行产物，自动创建、不入库 |
 
@@ -308,9 +308,35 @@ W3 收口后路线表只剩 W4：接真实模型验证 `[GUARD-REJECT]` 能否�
 假设性重放读成护栏有害**。完整分层见 [experiments/w4b_report.md](experiments/w4b_report.md)，
 注入口径与判定规则见 [docs/w4b-design.md](docs/w4b-design.md)。
 
+## W4-c 实测：补上被替换的干净动作，开放项在输出层可判定
+
+W4-b 之后只剩一个开放项：注入器只留坏文本，**模型原本生成的动作没留档**，
+无法验证「拒绝后重发的是不是原本那一个动作」。W4-c 给 `OutputFaultBackend`
+补一份独立只读 side-car（`--clean-actions-dir`）：注入时记下替换前的
+`clean_text`，**绝不写进 messages / system prompt / 拒绝文本**，运行时也不读它
+构造响应。既有 trace 8 字段、结果行、判分、全部既有 `run_id` 逐字节不变。
+离线两路校准（给不同动作 → 13 个 `different`；重发同一动作 → 13 个
+`identical`；`fpm=0` 基准 0 事件）先证明尺子没装反，OFF 跑完再过保险闸
+（`invalid_calls = 15`、21 条留档、四类故障全覆盖）才跑 ALL4。
+
+实测（216 次真实调用、约 ¥1.1 上界）：ALL4 **15 次拒绝全部配回留档**
+（`missing = 0`），15 个可比事件里 **14 次 `identical`**、1 次 `different`；
+且 **15/15 的工具名与结构化参数完全一致**，唯一的「不同」只是同一个
+`notify_customer` 调用换了通知话术。两格 `pass^k` 仍 **0.00**（本组主读数是
+判定分布，不是通过率）。
+
+**边界必须连结论一起讲**：① 模型从未见过 `clean_text`，两次调用的上下文几乎
+相同，14/15 是**同一上下文下的同策略复算**，不是回忆或理解，且动作空间窄、
+含机械成分，**不是理解率**；② `identical` 是规范化判定（比较 tool + args、
+忽略键序与空格），4 个事件靠规范化才判相同；③ `idempotency_skipped` 分层
+本轮 0 样本；④ 输出被注入扰动，不是纯净模型行为，**不说护栏有效、不说 W3
+机制被完整验证、不说 W3 提升被复现、不把四组数字拼曲线**。完整分层见
+[experiments/w4c_report.md](experiments/w4c_report.md)，判定规则见
+[docs/w4c-design.md](docs/w4c-design.md)。
+
 ## 开发路线
 
-> W1 全部、W2 全量、P0 实验记录体系、W2.5 校准，以及 W3 四条护栏、2×2 全因子、多种子稳健性检验、可达上限分析、分辨率审计、模型能力轴归因对照与 v2 扩展任务集分辨率实测已落地（护栏阶段收口）；W4 前置工程与首轮真实模型两格 A/B 已完成（H1 未被检验，见 [experiments/w4_report.md](experiments/w4_report.md)）；按用户确认的选项 A 另开 W4-b 注入实验组，17 次拒绝 / 17 次 responsive，H1 在输出层得到支持、但护栏效果仍不可测，见 [experiments/w4b_report.md](experiments/w4b_report.md)；**建议就此收口转向面试叙事**；冻结基线见 [experiments/mvp_baseline.md](experiments/mvp_baseline.md)。
+> W1 全部、W2 全量、P0 实验记录体系、W2.5 校准，以及 W3 四条护栏、2×2 全因子、多种子稳健性检验、可达上限分析、分辨率审计、模型能力轴归因对照与 v2 扩展任务集分辨率实测已落地（护栏阶段收口）；W4 前置工程、首轮两格 A/B（H1 未被检验，见 [experiments/w4_report.md](experiments/w4_report.md)）、W4-b 注入实验组（17 次拒绝 / 17 responsive，输出层结论，见 [experiments/w4b_report.md](experiments/w4b_report.md)）与 **W4-c 只读证据实验组**（15 个可比事件 / 14 次 identical，开放项在输出层可判定，见 [experiments/w4c_report.md](experiments/w4c_report.md)）全部交付，护栏效果仍不可测；**建议就此收口转向面试叙事**；冻结基线见 [experiments/mvp_baseline.md](experiments/mvp_baseline.md)。
 
 | 阶段 | 交付 |
 | --- | --- |
@@ -320,7 +346,7 @@ W3 收口后路线表只剩 W4：接真实模型验证 `[GUARD-REJECT]` 能否�
 | W2 余项 | `ModelReply` 真实观测、条件话术、trace 首个偏离点归因与证据入库（已交付） |
 | W2.5 | `SeededBackend` 校准 `pass^k` 区分度，零成本、不接真实模型（已交付） |
 | W3 | 逐项修运行时，每组只改一个变量：`schema_validation` / `idempotency` 的 2×2 主效应 / 交互、30 个 seed 的稳健性检验、`tool_retry` 与 `json_recovery` 的跨 seed A/B，以及九格可达上限分析并收口、`pass^k` 分辨率与效应掩蔽审计、模型能力轴 × 护栏轴的 2×8 归因对照、v2 扩展任务集与分辨率实测（已交付）；上下文压缩 / 预算转到 W4 真实模型阶段 |
-| W4 | 真实模型验证 `[GUARD-REJECT]`（前置工程 / 预算闸门 / 纠正探针 / 离线预检 / 首轮两格 A/B / **W4-b 注入实验组**全部交付；首轮 H1 未被检验，W4-b 在 17 次拒绝上给出输出层结论，见 [experiments/w4_report.md](experiments/w4_report.md) 与 [experiments/w4b_report.md](experiments/w4b_report.md)）；**建议收口**，不扩「4–6 组单变量对照」、不做成本帕累托图、不改判分器与任务集 |
+| W4 | 真实模型验证 `[GUARD-REJECT]`（前置工程 / 预算闸门 / 纠正探针 / 离线预检 / 首轮两格 A/B / **W4-b 注入实验组** / **W4-c 只读证据实验组**全部交付；首轮 H1 未被检验，W4-b 在 17 次拒绝上给出输出层结论，W4-c 补上被替换的干净动作留档后在 15 个事件上判定「重发同一个动作」，见 [experiments/w4_report.md](experiments/w4_report.md)、[experiments/w4b_report.md](experiments/w4b_report.md) 与 [experiments/w4c_report.md](experiments/w4c_report.md)）；**建议收口**，不扩「4–6 组单变量对照」、不做成本帕累托图、不改判分器与任务集 |
 | W5 | 服务化、并发、容器化、trace 回放、测试 |
 | W6 | 中文扩展任务集、结果表、复现文档 |
 

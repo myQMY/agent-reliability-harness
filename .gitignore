@@ -24,6 +24,8 @@ htmlcov/
 # --- 运行产物：可由复现命令重建，体量大 ---
 /traces/
 /results/
+# W4-c 只读 side-car：观测产物，与 traces/ 同惯例不入库
+/clean_actions/
 /runs/
 /experiments/outputs/
 *.db

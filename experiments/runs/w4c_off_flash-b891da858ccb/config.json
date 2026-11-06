@@ -1,0 +1,1 @@
+{"config":{"backend":"openai","compare":"","fault_per_mille":300,"k":3,"max_json_retries":2,"max_steps":12,"name":"w4c_off_flash","seed":11,"tasks":"tasks/mvp_10.jsonl"},"run_id":"w4c_off_flash-b891da858ccb"}
