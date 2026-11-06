@@ -1,0 +1,31 @@
+# W4-b 对照组：openai + 输出级故障注入，护栏全关（OFF）
+
+# 与 w4b_all4_flash.toml 构成单变量对照：测量链路上唯一不同的自变量仍是
+# [guards].enabled。注入参数（seed / fault_per_mille）两格完全相同。
+#
+# [seeded] 段名是 W2.5 校准器留下的历史命名，这里承载的是**通用注入参数**：
+# backend=openai 且 fault_per_mille>0 时，eval/config.py 会把它并入 run_id /
+# config.json，runtime/model.py 会把 OpenAIBackend 包进 OutputFaultBackend。
+# 段名不改，是为了不动 W3 全部既有配置与归档。
+#
+# fault_per_mille=300 是**装置参数**，不是模型能力轴：W3 归因实验用 60，
+# 但真实模型动作序列短（W4 首轮实测平均约 3 步），需要更高注入率才能在
+# 30 trial 上覆盖四类护栏。两组数字不可相减、不可拼曲线。见 docs/w4b-design.md。
+#
+# 输出被注入扰动，不是纯净模型行为；本组不得与 W4 首轮或 W3 归档做跨组比较。
+
+[experiment]
+name = "w4b_off_flash"
+tasks = "tasks/mvp_10.jsonl"
+k = 3
+backend = "openai"
+compare = ""
+
+[guards]
+max_steps = 12
+max_json_retries = 2
+# 故意不写 enabled：全部关闭，与 OFF 组语义一致。
+
+[seeded]
+seed = 11
+fault_per_mille = 300

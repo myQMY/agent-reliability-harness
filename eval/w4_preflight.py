@@ -61,7 +61,12 @@ PASS = "PASS"
 FAIL = "FAIL"
 BLOCKED = "BLOCKED"
 
-_MEASURED_FIELDS = ("tasks", "k", "backend", "max_steps", "max_json_retries")
+# W4-b 起注入率与 seed 也是测量链路上的自变量：两格必须一致，否则
+# 「唯一差异是护栏」的前提就不成立。首轮 W4 两格都是 0，加了不影响。
+_MEASURED_FIELDS = (
+    "tasks", "k", "backend", "max_steps", "max_json_retries",
+    "seed", "fault_per_mille",
+)
 
 
 @dataclass(frozen=True)
@@ -127,7 +132,8 @@ def run_checks(
             "两格只差 [guards].enabled（单变量）",
             FAIL if mismatched else PASS,
             f"测量字段不一致：{mismatched}" if mismatched
-            else "tasks / k / backend / max_steps / max_json_retries 全部相同",
+            else "tasks / k / backend / max_steps / max_json_retries / "
+                 "seed / fault_per_mille 全部相同",
         )
     )
 

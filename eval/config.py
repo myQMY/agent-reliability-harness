@@ -7,9 +7,10 @@ run_id 由配置摘要确定性生成，不含时间戳 / 随机值 / 机器路�
 
 摘要兼容约定：W1 冻结留档的 run_id 由原有 7 个字段算出，新增配置字段
 不得改变它。fingerprint 与 config_snapshot 统一走 _core()：seed /
-fault_per_mille 只在 backend=seeded 时并入，guards 只在非空时并入。
-因此「全部关闭」的配置摘要逐字节等于 W1 / W2.5，开启任一护栏才分叉出
-新 run_id——这正是 W3 单变量 A/B 需要的性质。
+fault_per_mille 在 backend=seeded 时恒并入，在 backend=openai 且非零时
+并入（W4-b 的输出级故障注入是真实生效的自变量），guards 只在非空时并入。
+因此「全部关闭」的配置摘要逐字节等于 W1 / W2.5，开启任一护栏或注入才
+分叉出新 run_id——这正是 W3 / W4-b 单变量 A/B 需要的性质。
 """
 from __future__ import annotations
 
@@ -54,7 +55,8 @@ class ExperimentConfig:
     max_steps: int = 12
     max_json_retries: int = 2
     compare: str = "experiments/baseline/result_rows.jsonl"
-    # 仅 backend == "seeded" 时生效；scripted / openai 下忽略
+    # 输出级故障注入：seeded 后端恒生效；openai 后端非零时启用
+    # OutputFaultBackend（W4-b），为 0 时完全不包装。scripted 忽略。
     seed: int = 0
     fault_per_mille: int = 0
     # W3 起的可开关运行时护栏；空元组 = 全部关闭（OFF 组），与 W1 行为逐字等价
@@ -151,6 +153,12 @@ def _core(config: ExperimentConfig) -> dict[str, Any]:
         field: getattr(config, field) for field in _CORE_FIELDS
     }
     if config.backend == "seeded":
+        payload["seed"] = config.seed
+        payload["fault_per_mille"] = config.fault_per_mille
+    elif config.backend == "openai" and config.fault_per_mille:
+        # W4-b：openai 后端的输出级故障注入是真实生效的自变量，必须进
+        # run_id / config.json 快照，否则「同 run_id 不同注入率」会悄悄
+        # 覆盖报告。仅在非零时并入，保证首轮 W4 的 run_id 逐字节不变。
         payload["seed"] = config.seed
         payload["fault_per_mille"] = config.fault_per_mille
     # 护栏开关是 W3 的实验自变量：开启后必须落到新 run_id，

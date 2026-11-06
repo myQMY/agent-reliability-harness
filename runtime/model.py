@@ -23,6 +23,14 @@ W4 前置：真实模型路径需要两件确定性后端不需要的东西—�
     本项目不用原生 tool_calls 协议，需在发出前转成 user 文本。
 两件事都只在 OpenAIBackend 内发生，ScriptedBackend / SeededBackend 的
 调用方与产物完全不变。
+
+W4-b：OutputFaultBackend 把 SeededBackend 那一套输出级故障注入接到 openai
+后端上——同一份 fault_rng / pick_fault / fault_text、同样的四类故障与
+(seed, task_id, trial, cursor) 派生 RNG，只在「模型输出」这一层替换文本。
+它与 SeededBackend 有一处本质差异：拒绝之后**不硬编码重发干净动作**，
+而是照常调用底层真实模型、仅跳过本次注入，让模型自己对 [GUARD-REJECT]
+作出响应。这正是 W4-b 要测的 H1，不能由 harness 代答。
+默认 fault_per_mille=0 时完全不包装，首轮 W4 的行为与 run_id 逐字节不变。
 """
 from __future__ import annotations
 
@@ -32,7 +40,7 @@ import os
 import random
 import time
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Mapping, Protocol, Sequence
 
 from env import tools
@@ -98,7 +106,9 @@ class BackendConfig:
     base_url: str = ""
     api_key: str = ""
     model: str = ""
-    # 仅 SeededBackend 使用；scripted / openai 下恒为 0，不影响任何既有行为
+    # 输出级故障注入参数：seeded 后端恒生效；openai 后端仅在非零时启用
+    # OutputFaultBackend（W4-b）。scripted 后端不读；openai 默认 0 时
+    # 完全不包装，既有 run_id / 归档逐字节不变。
     seed: int = 0
     fault_per_mille: int = 0
     # 仅 openai 后端生效：附加到基础 SYSTEM_PROMPT 之后的确定性上下文
@@ -167,6 +177,64 @@ def _as_action(text: str) -> dict[str, Any] | None:
     return action if isinstance(action, dict) else None
 
 
+def fault_rng(seed: int, task_id: str, trial: int, cursor: int) -> random.Random:
+    """输出级故障注入的确定性 PRNG：W3 的 SeededBackend 与 W4-b 的
+    OutputFaultBackend 共用同一份派生式，保证「同 seed 同 trial 同 cursor」
+    得到同一串判定，跨进程 / 跨机器可复现。不用内置 hash / 时间 / UUID。
+    """
+    key = f"{seed}|{task_id}|{trial}|{cursor}"
+    bits = int.from_bytes(
+        hashlib.sha256(key.encode("utf-8")).digest(), "big"
+    )
+    return random.Random(bits)
+
+
+def pick_fault(
+    seed: int,
+    task_id: str,
+    trial: int,
+    cursor: int,
+    fault_per_mille: int,
+    faulted: set[int],
+) -> str | None:
+    """每个 cursor 独立判定；None 表示本次输出保持干净。W3 / W4-b 共用。
+
+    ``faulted`` 保证每个 cursor 至多注入一次；故障类别在 SEEDED_FAULTS 上
+    均匀取样，与 W3 的全部留档口径一致。
+    """
+    if cursor in faulted:
+        return None
+    rng = fault_rng(seed, task_id, trial, cursor)
+    if rng.randrange(1000) >= fault_per_mille:
+        return None
+    return SEEDED_FAULTS[rng.randrange(len(SEEDED_FAULTS))]
+
+
+def fault_text(
+    kind: str, action: dict[str, Any], issued_writes: Sequence[str]
+) -> str:
+    """把一次干净的工具动作改写成四类输出级故障；W3 / W4-b 共用同一份实现。
+
+    duplicate_call 在还没有可重放的写动作时退化成 bad_args，与 W3 一致。
+    """
+    if kind == FAULT_BAD_JSON:
+        return "{not-json"
+    if kind == FAULT_WRONG_TOOL:
+        return json.dumps(
+            {"tool": "__missing_tool__", "args": action.get("args", {})},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    if kind == FAULT_DUPLICATE_CALL and issued_writes:
+        return issued_writes[-1]
+    # FAULT_BAD_ARGS，以及开局还没有写动作时的 duplicate_call 退化
+    return json.dumps(
+        {"tool": action["tool"], "args": {}},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
 class SeededBackend:
     """确定性伪随机模拟器：以脚本为意图动作，按固定 seed 注入可复现故障。
 
@@ -211,40 +279,23 @@ class SeededBackend:
         self._issued_writes: list[str] = []
 
     def _rng(self, cursor: int) -> random.Random:
-        key = f"{self._config.seed}|{self._task_id}|{self._trial}|{cursor}"
-        bits = int.from_bytes(
-            hashlib.sha256(key.encode("utf-8")).digest(), "big"
-        )
-        return random.Random(bits)
+        return fault_rng(self._config.seed, self._task_id, self._trial, cursor)
 
     def _pick_fault(self, cursor: int) -> str | None:
-        """每个 cursor 独立判定；返回 None 表示本次输出干净意图动作。"""
-        if cursor in self._faulted:
-            return None
+        """委托共享判定；force_fault 是 W3 单变量实验的调试开关。"""
         if self._force_fault is not None:
-            return self._force_fault
-        rng = self._rng(cursor)
-        if rng.randrange(1000) >= self._config.fault_per_mille:
-            return None
-        return SEEDED_FAULTS[rng.randrange(len(SEEDED_FAULTS))]
+            return None if cursor in self._faulted else self._force_fault
+        return pick_fault(
+            self._config.seed,
+            self._task_id,
+            self._trial,
+            cursor,
+            self._config.fault_per_mille,
+            self._faulted,
+        )
 
     def _fault_text(self, kind: str, action: dict[str, Any]) -> str:
-        if kind == FAULT_BAD_JSON:
-            return "{not-json"
-        if kind == FAULT_WRONG_TOOL:
-            return json.dumps(
-                {"tool": "__missing_tool__", "args": action.get("args", {})},
-                ensure_ascii=False,
-                sort_keys=True,
-            )
-        if kind == FAULT_DUPLICATE_CALL and self._issued_writes:
-            return self._issued_writes[-1]
-        # FAULT_BAD_ARGS，以及开局还没有写动作时的 duplicate_call 退化
-        return json.dumps(
-            {"tool": action["tool"], "args": {}},
-            ensure_ascii=False,
-            sort_keys=True,
-        )
+        return fault_text(kind, action, self._issued_writes)
 
     def _record_write(self, action: dict[str, Any], clean: str) -> None:
         if action.get("tool") in _SEEDED_WRITE_TOOLS:
@@ -285,6 +336,121 @@ class SeededBackend:
         self._faulted.add(cursor)
         self._pending_correct = clean
         return ModelReply(text=self._fault_text(kind, action))
+
+
+class OutputFaultBackend:
+    """W4-b：把 W3 的输出级故障注入接到任意 Backend 上（实际用 OpenAIBackend）。
+
+    与 SeededBackend 共用 ``fault_rng`` / ``pick_fault`` / ``fault_text`` 与
+    ``SEEDED_FAULTS``，因此「是否注入、注入哪一类、坏文本长什么样」与 W3
+    完全同源。差异只有两处，且都是 W4-b 成立的前提：
+
+    1. 干净动作来自**底层真实模型当次输出**，不是任务脚本；
+    2. 收到 ``[GUARD-REJECT]`` 后**绝不硬编码重发** ``_pending_correct``——
+       仍然调用底层真实模型，只跳过本次注入。模型是否读懂拒绝消息必须由
+       它自己的下一次输出回答，harness 不能代答。
+
+    注入后紧邻的下一次 generate 一律不注入（``_skip_next``），既给模型留出
+    响应拒绝的空间，也避免连续故障吃光 ``MAX_STEPS`` / 拦截预算。
+    ``ModelReply`` 的 token / latency 观测原样保留，只替换 ``text``，
+    因此预算闸门与结果行的用量口径不受影响。
+    """
+
+    def __init__(
+        self,
+        inner: Backend,
+        *,
+        seed: int,
+        fault_per_mille: int,
+        task_id: str = "",
+        trial: int = 0,
+    ):
+        self._inner = inner
+        self._seed = seed
+        self._fault_per_mille = fault_per_mille
+        self._task_id = task_id
+        self._trial = trial
+        self._cursor = 0
+        self._faulted: set[int] = set()
+        self._skip_next = False
+        # 只留可观测的注入记录，供离线装置校准读数；不进 trace / 结果行。
+        self.injected: list[tuple[int, str]] = []
+
+    @property
+    def inner(self) -> Backend:
+        return self._inner
+
+    @staticmethod
+    def _last_successful_write(
+        messages: Sequence[Mapping[str, str]],
+    ) -> str | None:
+        """找最近一条**确实成功执行过**的写动作原文。
+
+        ``duplicate_call`` 必须重放一个已成功的写动作，才会被
+        ``idempotency`` 护栏的 ``executed_write_keys`` 命中；拿一个从未
+        执行过的动作去重放只会再写一次库，制造不出拒绝。tool 观察是
+        loop 用 ``tools.call`` 的返回值序列化的，这里只认 ``ok=True``。
+        """
+        for index in range(len(messages) - 1, -1, -1):
+            message = messages[index]
+            if message.get("role") != "tool":
+                continue
+            try:
+                observation = json.loads(message.get("content", ""))
+            except (ValueError, TypeError):
+                continue
+            if not (
+                isinstance(observation, dict) and observation.get("ok") is True
+            ):
+                continue
+            for back in range(index - 1, -1, -1):
+                if messages[back].get("role") != "assistant":
+                    continue
+                action = _as_action(messages[back].get("content", ""))
+                if action and action.get("tool") in _SEEDED_WRITE_TOOLS:
+                    return messages[back]["content"]
+                break
+        return None
+
+    def generate(self, messages: list[dict[str, str]]) -> ModelReply:
+        reply = self._inner.generate(messages)
+        cursor = self._cursor
+        self._cursor += 1
+
+        # 拒绝之后的这一次输出就是 H1 的测量对象：无论上一步是否注入，
+        # 都不允许再扰动它。
+        rejecting = bool(messages) and messages[-1].get("content", "").startswith(
+            GUARD_REJECT_PREFIX
+        )
+        if rejecting or self._skip_next:
+            self._skip_next = False
+            return reply
+
+        action = _as_action(reply.text)
+        # 与 W3 一致：final、本来就解析不出的输出不参与注入。
+        if action is None or "tool" not in action:
+            return reply
+
+        kind = pick_fault(
+            self._seed,
+            self._task_id,
+            self._trial,
+            cursor,
+            self._fault_per_mille,
+            self._faulted,
+        )
+        if kind is None:
+            return reply
+
+        self._faulted.add(cursor)
+        self._skip_next = True
+        writes: list[str] = []
+        previous = self._last_successful_write(messages)
+        if previous is not None:
+            writes.append(previous)
+        text = fault_text(kind, action, writes)
+        self.injected.append((cursor, kind))
+        return replace(reply, text=text)
 
 
 def _wire_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -380,12 +546,22 @@ def build_backend(
             raise ValueError(
                 "OpenAIBackend 需要 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL"
             )
-        return OpenAIBackend(
+        backend: Backend = OpenAIBackend(
             config.base_url,
             config.api_key,
             config.model,
             system_prompt=config.system_prompt,
         )
+        # fpm=0 时完全不包装：首轮 W4 的调用路径、trace 与 run_id 逐字节不变。
+        if config.fault_per_mille:
+            backend = OutputFaultBackend(
+                backend,
+                seed=config.seed,
+                fault_per_mille=config.fault_per_mille,
+                task_id=task_id,
+                trial=trial,
+            )
+        return backend
     raise ValueError(f"未知后端：{config.name}")
 
 

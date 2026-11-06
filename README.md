@@ -26,8 +26,8 @@ Agent demo 和能稳定运行的 Agent 之间，差的通常不是模型能力�
 | `runtime/` | 自研薄运行时：循环、护栏、上下文与预算管理 |
 | `eval/` | 用户模拟器、批量执行器、终态判分、归因分析、CLI |
 | `web/` | trace 回放与实验对照面板（W5） |
-| `docs/` | 产品设计与技术实现方案；W4 真实模型实验设计见 [docs/w4-design.md](docs/w4-design.md) |
-| `experiments/` | 版本化实验配置（`config.toml` / `calibration.toml` / `guard_ab_*.toml` / `w4_*_flash.toml`）、冻结基线、按 `run_id` 留档的报告与结果行、`w3_guard_matrix.md` 因子汇总、`w3_robustness.md` 多种子稳健性检验、`w3_tool_retry_sweep.md` / `w3_json_recovery_sweep.md` 跨 seed A/B、`w3_ceiling.md` 可达上限分析、`w3_resolution.md` 分辨率与效应掩蔽审计、`w3_attribution.md` 模型能力轴归因对照、`w3_taskset_scale.md` v2 扩展任务集分辨率实测、`w4_budget_estimate.md` 离线上界、`w4_probe_dryrun.md` 探针校准、`w4_preflight.md` 跑批前就绪快照、**W4 首轮实测** `w4_report.md` 结论报告与 `w4_probe.md` 只读探针结果 |
+| `docs/` | 产品设计与技术实现方案；W4 真实模型实验设计见 [docs/w4-design.md](docs/w4-design.md)，W4-b 注入实验设计见 [docs/w4b-design.md](docs/w4b-design.md) |
+| `experiments/` | 版本化实验配置（`config.toml` / `calibration.toml` / `guard_ab_*.toml` / `w4_*_flash.toml`）、冻结基线、按 `run_id` 留档的报告与结果行、`w3_guard_matrix.md` 因子汇总、`w3_robustness.md` 多种子稳健性检验、`w3_tool_retry_sweep.md` / `w3_json_recovery_sweep.md` 跨 seed A/B、`w3_ceiling.md` 可达上限分析、`w3_resolution.md` 分辨率与效应掩蔽审计、`w3_attribution.md` 模型能力轴归因对照、`w3_taskset_scale.md` v2 扩展任务集分辨率实测、`w4_budget_estimate.md` 离线上界、`w4_probe_dryrun.md` 探针校准、`w4_preflight.md` 跑批前就绪快照、**W4 首轮实测** `w4_report.md` 结论报告与 `w4_probe.md` 只读探针结果、**W4-b 装置** `w4b_*_flash.toml` 两格配置、`w4b_probe_dryrun.md` 离线装置校准、`w4b_preflight.md` 就绪快照 |
 | `tests/` | 单元测试与回归用例 |
 | `traces/`, `results/` | 运行产物，自动创建、不入库 |
 

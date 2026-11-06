@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from pathlib import Path
 
 from eval import analyze, budget
@@ -50,7 +51,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--backend", choices=("scripted", "openai", "seeded"), default=None
     )
-    # 仅 backend = seeded 时生效；不传则由 [seeded] 配置段决定
+    # 输出级故障注入参数：seeded 后端恒生效；openai 后端非零时启用
+    # OutputFaultBackend（W4-b）。不传则由 [seeded] 配置段决定。
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--fault-per-mille", type=int, default=None)
     # W3 起的可开关护栏；与 [guards].enabled 合并去重，白名单由 choices 与 validate 双重把守
@@ -151,7 +153,13 @@ def main(argv: list[str] | None = None) -> int:
             price=price,
         )
         budget_limit.validate()
-        backend = config_from_env(load_dotenv(args.env_file))
+        # 注入参数只在 openai 非零时启用 OutputFaultBackend；首轮 W4 的
+        # seed / fpm 都是 0，replace 后与原来逐字节一致。
+        backend = replace(
+            config_from_env(load_dotenv(args.env_file)),
+            seed=cfg.seed,
+            fault_per_mille=cfg.fault_per_mille,
+        )
     elif any(value is not None for value in budget_args):
         raise SystemExit(
             "预算参数仅在 --backend openai 下生效；确定性后端不产生真实调用，"
