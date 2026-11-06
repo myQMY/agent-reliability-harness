@@ -31,6 +31,13 @@ W4-b：OutputFaultBackend 把 SeededBackend 那一套输出级故障注入接到
 而是照常调用底层真实模型、仅跳过本次注入，让模型自己对 [GUARD-REJECT]
 作出响应。这正是 W4-b 要测的 H1，不能由 harness 代答。
 默认 fault_per_mille=0 时完全不包装，首轮 W4 的行为与 run_id 逐字节不变。
+
+W4-c：OutputFaultBackend 另把**被替换掉的干净动作**（注入前 reply.text）记进
+``clean_actions``，由 eval 层写到独立 side-car 目录，供离线判定「拒绝后
+重发的是不是原本那一个动作」。留档是**事后观测**：clean_text 绝不写进
+messages / system prompt / 拒绝文本，运行时也绝不读它来构造响应；否则
+「重发同一个动作」又会变成 harness 代答。既有 trace 8 字段、结果行、
+判分、run_id 一律不变。
 """
 from __future__ import annotations
 
@@ -354,6 +361,12 @@ class OutputFaultBackend:
     响应拒绝的空间，也避免连续故障吃光 ``MAX_STEPS`` / 拦截预算。
     ``ModelReply`` 的 token / latency 观测原样保留，只替换 ``text``，
     因此预算闸门与结果行的用量口径不受影响。
+
+    W4-c 的 ``clean_actions`` 是每次注入时追加的一条**只读留档**：记下注入前
+    的 ``reply.text``（模型自己当次生成的动作）与替换后的坏文本。它只被
+    eval 层在 trial 结束后写到独立 side-car 文件，供离线探针把「被拒的那次
+    输出」配回「原本那一个动作」。运行时不读、不回灌、不改变任何一次
+    generate 的返回值——这是防代答红线的代码级落点。
     """
 
     def __init__(
@@ -375,6 +388,13 @@ class OutputFaultBackend:
         self._skip_next = False
         # 只留可观测的注入记录，供离线装置校准读数；不进 trace / 结果行。
         self.injected: list[tuple[int, str]] = []
+        # W4-c：被替换掉的干净动作留档（事后只读证据），不进 messages。
+        self.clean_actions: list[dict[str, Any]] = []
+
+    @property
+    def trial_id(self) -> str:
+        """与 runner / trace 同一套标识；缺 task_id 时留空，不编造。"""
+        return f"{self._task_id}-t{self._trial}" if self._task_id else ""
 
     @property
     def inner(self) -> Backend:
@@ -450,6 +470,17 @@ class OutputFaultBackend:
             writes.append(previous)
         text = fault_text(kind, action, writes)
         self.injected.append((cursor, kind))
+        self.clean_actions.append(
+            {
+                "task_id": self._task_id,
+                "trial": self._trial,
+                "trial_id": self.trial_id,
+                "cursor": cursor,
+                "fault_kind": kind,
+                "clean_text": reply.text,
+                "injected_text": text,
+            }
+        )
         return replace(reply, text=text)
 
 

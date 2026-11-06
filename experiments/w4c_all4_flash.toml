@@ -1,0 +1,31 @@
+# W4-c 实验组：openai + 输出级故障注入 + 干净动作只读留档，四条护栏全开（ALL4）
+
+# 与 w4c_off_flash.toml 构成单变量对照：测量链路上唯一不同的自变量是
+# [guards].enabled。注入参数（seed / fault_per_mille）两格完全相同。
+# 本组主读数是「拒绝后重发的是不是原本那一个动作」的判定分布，不是 pass^k；
+# 判定口径在 docs/w4c-design.md §3 / §6 跑批前写死，不事后调整。
+#
+# 与 W4-b 的装置差异只有一处：注入时留档被替换的干净动作，写到独立
+# side-car 目录（--clean-actions-dir）。留档绝不回灌给模型，否则「重发
+# 同一个动作」又变成 harness 代答。既有 trace 8 字段 / 结果行 / 判分 /
+# run_id 一律不变。
+#
+# 输出被注入扰动，不是纯净模型行为；本组不得与 W3 / W4 首轮 / W4-b
+# 做任何跨组相减或拼曲线。
+
+[experiment]
+name = "w4c_all4_flash"
+tasks = "tasks/mvp_10.jsonl"
+k = 3
+backend = "openai"
+# 指向 W4-c OFF 组留档（由该组 run_id 确定性推导，不含时间戳）。
+compare = "experiments/runs/w4c_off_flash-b891da858ccb/result_rows.jsonl"
+
+[guards]
+max_steps = 12
+max_json_retries = 2
+enabled = ["schema_validation", "idempotency", "tool_retry", "json_recovery"]
+
+[seeded]
+seed = 11
+fault_per_mille = 300

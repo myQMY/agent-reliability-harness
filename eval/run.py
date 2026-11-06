@@ -65,6 +65,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--runs-dir", type=Path, default=Path("experiments/runs")
     )
     parser.add_argument("--report", type=Path, default=None)
+    # W4-c：OutputFaultBackend 的「被替换干净动作」只读留档目录。
+    # 输出路径不进 run_id（与 --traces-dir / --results-dir 同惯例）。
+    parser.add_argument(
+        "--clean-actions-dir", type=Path, default=None,
+        help="W4-c 只读 side-car 目录；仅在 openai + fault_per_mille>0 时有意义",
+    )
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     # W4 起真实模型专用预算闸门：不进 run_id（不是实验自变量），但必须显式
     # 给出，避免忘设上限时一次跑批静默烧钱。确定性后端传这些参数直接报错。
@@ -105,6 +111,18 @@ def main(argv: list[str] | None = None) -> int:
         guards=merged_guards,
     )
     rid = exp_config.run_id(cfg)
+
+    # W4-c：留档目录只在真的存在 OutputFaultBackend 时才有意义。「写了却没
+    # 接上」比没写更危险——会让人误以为拿到了一份只读证据。必须在构造
+    # 后端 / 产生任何模型调用之前拒绝，且不进 run_id（输出路径不是自变量）。
+    if args.clean_actions_dir is not None and not (
+        cfg.backend == "openai" and cfg.fault_per_mille
+    ):
+        raise SystemExit(
+            "--clean-actions-dir 仅在 backend=openai 且 fault_per_mille>0 时生效；"
+            "当前后端没有 OutputFaultBackend，不会产生任何留档。"
+            "本次未发起任何模型调用、未产生费用。"
+        )
 
     # 必须在构造后端 / 产生任何模型调用之前检查：真实模型跑批一旦开跑就
     # 开始计费，事后再发现对照缺失已经晚了。只在 openai 后端生效，
@@ -184,6 +202,7 @@ def main(argv: list[str] | None = None) -> int:
         max_json_retries=cfg.max_json_retries,
         guards=cfg.guards,
         budget_limit=budget_limit,
+        clean_actions_dir=args.clean_actions_dir,
     )
     try:
         rows = runner.run(run_config)
@@ -239,6 +258,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(f"结果行：{args.results_dir / 'result_rows.jsonl'}")
     print(f"trace：{args.traces_dir}/<trial_id>.jsonl")
+    if args.clean_actions_dir is not None:
+        print(f"干净动作留档：{args.clean_actions_dir}/<trial_id>.jsonl")
     print(f"结果表：{report_path}")
     return 0
 

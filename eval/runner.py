@@ -15,7 +15,12 @@ from env import db
 from eval import budget, grader, trace
 from eval.user_sim import RuleUserSimulator, TurnContext
 from runtime import guard, loop
-from runtime.model import BackendConfig, build_backend, build_tool_context
+from runtime.model import (
+    BackendConfig,
+    OutputFaultBackend,
+    build_backend,
+    build_tool_context,
+)
 
 Task = dict[str, Any]
 Row = dict[str, Any]
@@ -36,6 +41,10 @@ class RunConfig:
     # W4 起真实模型专用：None = 不启用预算闸门（确定性后端默认如此）。
     # 预算不进入 run_id——它不是实验自变量，只是花钱的安全阀。
     budget_limit: budget.BudgetLimit | None = None
+    # W4-c：把 OutputFaultBackend 的 clean_actions 写到独立 side-car 目录。
+    # None = 不落盘（所有既有路径逐字节不变）；输出路径不是实验自变量，
+    # 不进 run_id，与 --traces-dir / --results-dir 同惯例。
+    clean_actions_dir: Path | None = None
 
 
 def load_tasks(path: Path) -> list[Task]:
@@ -69,6 +78,9 @@ def _run_trial(
         task_id=task["id"],
         trial=trial,
     )
+    # W4-c：先保存注入器引用，预算装饰之后仍能读到 trial 内的只读留档。
+    # 其它后端（scripted / seeded / 未开启注入的 openai）保持 None。
+    recorder = backend if isinstance(backend, OutputFaultBackend) else None
     # 闸门包在整个 run 共享的 ledger 上，per-trial 新建后端不会把累计清零。
     if config.budget_limit is not None and ledger is not None:
         backend = budget.BudgetedBackend(backend, ledger, config.budget_limit)
@@ -151,6 +163,17 @@ def _run_trial(
         "invalid_calls": len(errors),
     }
     trace.write_jsonl(config.traces_dir / f"{trial_id}.jsonl", spans)
+    # W4-c 的只读证据与既有 trace 物理隔离：独立目录、独立文件，
+    # 不改上面的 8 字段 span、结果行或判分；只在确有注入时写文件。
+    if (
+        config.clean_actions_dir is not None
+        and recorder is not None
+        and recorder.clean_actions
+    ):
+        trace.write_jsonl(
+            config.clean_actions_dir / f"{trial_id}.jsonl",
+            recorder.clean_actions,
+        )
     conn.close()
     return row
 
