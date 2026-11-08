@@ -278,9 +278,19 @@ def render_report(
     rid: str,
     baseline_rows: list[Row] | None = None,
     config_path: str | None = None,
+    max_calls: int | None = None,
 ) -> str:
-    """生成报告；内容只依赖结果行、配置与基线行，绝不依赖输出路径或时钟。"""
+    """生成报告；只依赖结果行、配置、基线与预算参数，绝不依赖输出路径或时钟。"""
     summary = summarize(rows, config.k)
+    # openai 路径的复现命令必须写全 --max-calls：eval.run 会在构造后端、
+    # 发起任何模型调用之前对缺失预算直接 SystemExit。优先记录本次真实闸门；
+    # 离线重渲染拿不到 CLI 参数时，用与 eval.budget.estimate_plan(cells=1)
+    # 同源的单格最坏上界兜底，保证复制出来的命令仍可执行。
+    budget_calls = (
+        max_calls
+        if max_calls is not None
+        else max(1, summary["task_count"] * config.k * config.max_steps)
+    )
     briefs: dict[str, str] = {}
     for task in tasks:
         text = task["user_utterances"][0]
@@ -309,6 +319,13 @@ def render_report(
         if config.guards
         else []
     )
+    # 预算闸门只作用于 openai：如实记录本次上界，其它后端一行都不加，
+    # 既有 scripted / seeded 归档报告逐字节不变。
+    budget_rows = (
+        [f"| 预算上界（--max-calls） | {budget_calls} |"]
+        if config.backend == "openai"
+        else []
+    )
     lines = [
         f"# 实验结果：{config.name} / `{rid}`",
         "",
@@ -325,6 +342,7 @@ def render_report(
         f"| 后端 | {backend_name} |",
         *seeded_rows,
         *guard_rows,
+        *budget_rows,
         f"| 任务集 | `{config.tasks}` |",
         f"| 任务数 | {summary['task_count']} |",
         f"| k | {summary['k']} |",
@@ -389,7 +407,9 @@ def render_report(
             f" --fault-per-mille {config.fault_per_mille}"
         )
     elif config.backend == "openai":
-        reproduce += " --backend openai"
+        # 缺 --max-calls 的复现命令会被预算闸门直接拒绝启动，
+        # 等于给读者一条复制即失败的命令；这里必须与运行配置表一致。
+        reproduce += f" --backend openai --max-calls {budget_calls}"
     for name in config.guards:
         reproduce += f" --guard {name}"
     next_step = (

@@ -408,5 +408,24 @@ class TestW3FactorialContract(unittest.TestCase):
                 self.assertIn(compact(phrase), stack, f"技术方案缺少 {phrase}")
 
 
+class TestReproduceCommandContract(unittest.TestCase):
+    """openai 复现命令必须自带预算闸门参数，防止「复制即 SystemExit」回潮。"""
+
+    def test_analyzer_openai_branch_emits_budget_flag(self):
+        source = read("eval/analyze.py")
+        self.assertIn("--backend openai --max-calls", source)
+        self.assertIn("max_calls: int | None = None", source)
+
+    def test_cli_still_requires_and_forwards_the_budget(self):
+        source = read("eval/run.py")
+        self.assertIn("args.max_calls is None", source)
+        self.assertIn("max_calls=args.max_calls", source)
+
+    def test_readme_openai_quickstart_has_budget_flag(self):
+        self.assertIn(
+            "python -m eval.run --backend openai --max-calls", read("README.md")
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

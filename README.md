@@ -2,7 +2,38 @@
 
 面向多轮工具调用 Agent 的可靠性评测与运行时平台。
 
+> **先说清楚定位**：这是一套**评测装置 / 运行时平台**，不是面向用户的 Agent 应用，也不是能评测任意 Agent 的通用平台。被测量、被改进的是 harness 本身，任务集只是标尺。
+
+## 30 秒看懂
+
+| 你想知道 | 答案 |
+| --- | --- |
+| 它是什么 | Agent 运行时 + 评测可观测层的**实验装置**；任务集是标尺，被测对象是 harness 本身 |
+| 解决什么 | 把「一次运行时改动是否真的让 Agent 更稳」做成可证伪、可复现的对照实验，而不是靠 demo 观感 |
+| 怎么测 | 有状态任务 + 数据库终态自动判分 + `pass^k`（同一任务连续 k 次全过）+ 全链路 trace 首个偏离点归因 |
+| 最硬的结论 | W3 归因对照：fpm=60 时 `off` 0.1433 → 四护栏全开 0.3000；把故障率降到 0 只到 0.2000 → **提升主要来自 harness 而非换模型**（2×8 全因子、30 seed 描述性统计，不是 A/B 因果） |
+| 真实模型 | W4 三轮两格 `pass^k` 均为 0.00。这是「发现装置缺陷 → 离线校准 → 修复重跑 → 分层下结论」的工程故事，**不是护栏有效的证据** |
+| 怎么跑 | `python -m eval.run --tasks tasks/mvp_10.jsonl --k 3`，零第三方依赖、零密钥；`python -m unittest discover -s tests -v` 守门 |
+| 证据在哪 | `experiments/` 下 22 份报告 + 14 组按 `run_id` 归档；同配置 + 同一 commit 逐字节可复现 |
+
+**三条不能越过的边界**：① 任务集只有自建 `mvp_10` / `mvp_30`，τ-bench 公开集与中文扩展集**未接入**；② 判分是终态结构化 diff（其中含自由文本字段），真实模型两格 0.00 的根因在此，改判分器是红线；③ W3 与 W4 自变量不同，数字不可拼成曲线，`pass^k` 分辨率恒为 1/N。
+
+## 快速导航
+
+| 我想… | 打开 |
+| --- | --- |
+| 跑起来 / 三个后端 | 下方「快速开始」；生效配置 [experiments/config.toml](experiments/config.toml) |
+| 看 W3 实验链 | [w3_guard_matrix.md](experiments/w3_guard_matrix.md) · [w3_robustness.md](experiments/w3_robustness.md) · [w3_ceiling.md](experiments/w3_ceiling.md) · [w3_resolution.md](experiments/w3_resolution.md) · [w3_attribution.md](experiments/w3_attribution.md) |
+| 看 W4 三轮 | [w4_report.md](experiments/w4_report.md) · [w4b_report.md](experiments/w4b_report.md) · [w4c_report.md](experiments/w4c_report.md) |
+| 看设计 | [mvp-design.md](docs/mvp-design.md) · [tech-stack.md](docs/tech-stack.md) · [w4-design.md](docs/w4-design.md) |
+| 看全部阶段 | 下方「开发路线」与 [experiments/](experiments/) |
+
+<details>
+<summary><strong>版本状态（完整原文，点开展开）</strong></summary>
+
 > 状态：W1 全部、W2 全量（判分 / trace / 真实模型观测 / 条件话术 / trace 归因）、P0 实验记录体系、W2.5 测量链路校准，以及 W3 四条护栏（`schema_validation` / `idempotency` / `tool_retry` / `json_recovery`）的单变量 A/B、2×2 全因子、多种子稳健性检验、可达上限分析、`pass^k` 分辨率与效应掩蔽审计、模型能力轴 × 护栏轴归因对照，以及 v2 扩展任务集与分辨率实测对照已落地；W4 前置工程与**首轮真实模型两格 A/B 已完成**（DeepSeek `deepseek-flash`，182 次真实调用）。首轮两格 `pass^k` 均为 0.00、纠正探针两组均 0 次拒绝，**H1 未被检验而非被证伪**；完整结论、三层根因与口径边界见 [experiments/w4_report.md](experiments/w4_report.md)。**W3 数字不得外推到真实模型，两组结果不可拼曲线。** 用户确认选项 A 后已另开 **W4-b**（`OutputFaultBackend` 给 `openai` 后端接上与 W3 同源的输出级故障注入，`fpm=300`）：ALL4 组 **17 次拒绝 / 17 次 responsive**，H1 在**输出层**得到支持，但两格 `pass^k` 仍 0.00、护栏效果仍不可测，且**输出被注入扰动、不是纯净模型行为**；见 [experiments/w4b_report.md](experiments/w4b_report.md)。用户随后确认「继续补只读证据」并另开 **W4-c**：注入器把被替换掉的干净动作写进独立只读 side-car（绝不回灌给模型），15 个可比事件里 **14 次重回同一个合法调用**、`missing=0`，开放项在输出层可判定；但这是**同策略复算、不是理解**，两格 `pass^k` 仍 0.00、护栏效果仍不可测，见 [experiments/w4c_report.md](experiments/w4c_report.md)。本文件不写任何未经验证的结论；所有指标以 `experiments/` 下可复现的结果为准。
+
+</details>
 
 ## 为什么做这个
 
@@ -21,11 +52,11 @@ Agent demo 和能稳定运行的 Agent 之间，差的通常不是模型能力�
 
 | 路径 | 内容 |
 | --- | --- |
-| `tasks/` | 版本化任务集：`mvp_10.jsonl`（W1 起 10 条，冻结不改）与 `mvp_30.jsonl`（v2 扩展集，前 10 行逐字节沿用 + 20 条独立任务）；构造规则见 [tasks/README.md](tasks/README.md)；公开集 W4 / 中文扩展集 W6 接入 |
+| `tasks/` | 版本化任务集：`mvp_10.jsonl`（W1 起 10 条，冻结不改）与 `mvp_30.jsonl`（v2 扩展集，前 10 行逐字节沿用 + 20 条独立任务）；构造规则见 [tasks/README.md](tasks/README.md)；τ-bench 公开集与中文扩展集**均未接入**（仅路线规划） |
 | `env/` | 隔离业务库、带副作用的工具 API、领域策略规则 |
 | `runtime/` | 自研薄运行时：循环、护栏、上下文与预算管理 |
 | `eval/` | 用户模拟器、批量执行器、终态判分、归因分析、CLI |
-| `web/` | trace 回放与实验对照面板（W5） |
+| `web/` | 预留目录（仅 `.gitkeep`）；trace 回放与实验对照面板**尚未实现**，逐 trial 证据直接读 `traces/*.jsonl` |
 | `docs/` | 产品设计与技术实现方案；W4 真实模型实验设计见 [docs/w4-design.md](docs/w4-design.md)，W4-b 注入实验设计见 [docs/w4b-design.md](docs/w4b-design.md)，W4-c 只读证据设计见 [docs/w4c-design.md](docs/w4c-design.md) |
 | `experiments/` | 版本化实验配置（`config.toml` / `calibration.toml` / `guard_ab_*.toml` / `w4*_flash.toml`）、冻结基线、按 `run_id` 留档的报告与结果行、`w3_guard_matrix.md` 因子汇总、`w3_robustness.md` 多种子稳健性检验、`w3_tool_retry_sweep.md` / `w3_json_recovery_sweep.md` 跨 seed A/B、`w3_ceiling.md` 可达上限分析、`w3_resolution.md` 分辨率与效应掩蔽审计、`w3_attribution.md` 模型能力轴归因对照、`w3_taskset_scale.md` v2 扩展任务集分辨率实测、`w4_budget_estimate.md` 离线上界、`w4_probe_dryrun.md` 探针校准、`w4_preflight.md` 跑批前就绪快照、**W4 首轮实测** `w4_report.md` 结论报告与 `w4_probe.md` 只读探针结果、**W4-b** `w4b_*_flash.toml` 两格配置、`w4b_probe_dryrun.md` 离线装置校准、`w4b_preflight.md` 就绪快照、`w4b_report.md` 结论报告与 `w4b_probe.md` 只读探针结果、**W4-c** `w4c_*_flash.toml` 两格配置、`w4c_probe_dryrun.md` 离线校准、`w4c_preflight.md` 就绪快照、`w4c_report.md` 结论报告与 `w4c_probe.md` 只读判定结果 |
 | `tests/` | 单元测试与回归用例 |
@@ -60,7 +91,7 @@ python -m eval.run --tasks tasks/mvp_10.jsonl --k 3
 
 `experiments/mvp_baseline.md` 与 `experiments/baseline/result_rows.jsonl` 是 **W1 冻结基线**，只读参照，任何运行都不会覆盖；每次报告自动带「与冻结基线对照」表。显式 `--report` 视为临时报告，且指向冻结基线时会被直接拒绝。
 
-默认使用 `ScriptedBackend`（确定性脚本、零成本、零密钥），token / 延迟恒为 0。切真实模型时复制 `.env.example` 为 `.env` 填入 `LLM_*`，再执行 `python -m eval.run --backend openai --k 3`；该路径走标准库 `urllib`，同样无需安装 SDK，并从响应的 `usage` 读取 prompt / completion token、用墙钟耗时记录 `latency_ms`。真实观测只进 trace 与结果行，不参与判分；报告会如实标注该路径不保证逐字节可复现。
+默认使用 `ScriptedBackend`（确定性脚本、零成本、零密钥），token / 延迟恒为 0。切真实模型时复制 `.env.example` 为 `.env` 填入 `LLM_*`，再执行 `python -m eval.run --backend openai --max-calls 720 --k 3`（`--max-calls` 是**单次 `eval.run`** 的调用数硬闸门，不显式给出会被预算闸门直接拒绝启动；上界可先用 `python -m eval.budget` 离线估算）；该路径走标准库 `urllib`，同样无需安装 SDK，并从响应的 `usage` 读取 prompt / completion token、用墙钟耗时记录 `latency_ms`。真实观测只进 trace 与结果行，不参与判分；报告会如实标注该路径不保证逐字节可复现。
 
 多轮任务可带可选的 `utterance_rules` 条件话术：Agent 上一轮反问时按规则换一句更合适的话，仍是确定性字符串匹配、不调模型。默认任务集的规则在脚本后端下不命中，因此冻结基线保持不变；字段说明见 [tasks/README.md](tasks/README.md)。
 
@@ -347,9 +378,9 @@ W4-b 之后只剩一个开放项：注入器只留坏文本，**模型原本生�
 | W2.5 | `SeededBackend` 校准 `pass^k` 区分度，零成本、不接真实模型（已交付） |
 | W3 | 逐项修运行时，每组只改一个变量：`schema_validation` / `idempotency` 的 2×2 主效应 / 交互、30 个 seed 的稳健性检验、`tool_retry` 与 `json_recovery` 的跨 seed A/B，以及九格可达上限分析并收口、`pass^k` 分辨率与效应掩蔽审计、模型能力轴 × 护栏轴的 2×8 归因对照、v2 扩展任务集与分辨率实测（已交付）；上下文压缩 / 预算转到 W4 真实模型阶段 |
 | W4 | 真实模型验证 `[GUARD-REJECT]`（前置工程 / 预算闸门 / 纠正探针 / 离线预检 / 首轮两格 A/B / **W4-b 注入实验组** / **W4-c 只读证据实验组**全部交付；首轮 H1 未被检验，W4-b 在 17 次拒绝上给出输出层结论，W4-c 补上被替换的干净动作留档后在 15 个事件上判定「重发同一个动作」，见 [experiments/w4_report.md](experiments/w4_report.md)、[experiments/w4b_report.md](experiments/w4b_report.md) 与 [experiments/w4c_report.md](experiments/w4c_report.md)）；**建议收口**，不扩「4–6 组单变量对照」、不做成本帕累托图、不改判分器与任务集 |
-| W5 | 服务化、并发、容器化、trace 回放、测试 |
-| W6 | 中文扩展任务集、结果表、复现文档 |
+| W5 | 服务化、并发、容器化、trace 回放、测试（**未实现**，仅路线规划） |
+| W6 | 中文扩展任务集、结果表、复现文档（**未实现**，仅路线规划） |
 
 ## 任务集来源
 
-MVP 使用自建 10 条最小任务（`mvp_10.jsonl`，冻结不改），W3 收口后另开版本化扩展集 `mvp_30.jsonl`（前 10 行逐字节沿用 + 20 条独立任务）用于提高 `pass^k` 分辨率；两者共用同一终态判分口径，但**跨任务集的分数不可直接比较**。格式对齐 τ-bench 的终态判分口径；公开的 τ-bench 系列（retail / airline）按路线 W4 接入，中文扩展集在 W6。任务格式、构造规则与引用说明见 [tasks/README.md](tasks/README.md)。
+MVP 使用自建 10 条最小任务（`mvp_10.jsonl`，冻结不改），W3 收口后另开版本化扩展集 `mvp_30.jsonl`（前 10 行逐字节沿用 + 20 条独立任务）用于提高 `pass^k` 分辨率；两者共用同一终态判分口径，但**跨任务集的分数不可直接比较**。格式对齐 τ-bench 的终态判分口径；**公开的 τ-bench 系列（retail / airline）与中文扩展集均未接入**，当前只有上述两套自建任务集，公开集 / W6 仅属路线规划。任务格式、构造规则与引用说明见 [tasks/README.md](tasks/README.md)。

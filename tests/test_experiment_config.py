@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 import json
+import shlex
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -213,12 +214,18 @@ class TestFrozenBaseline(unittest.TestCase):
 
 
 class TestReport(unittest.TestCase):
-    def _render(self, backend: str, baseline: list[dict] | None) -> str:
+    def _render(
+        self,
+        backend: str,
+        baseline: list[dict] | None,
+        max_calls: int | None = None,
+    ) -> str:
         cfg = exp_config.with_overrides(exp_config.load_config(), backend=backend)
         tasks = runner.load_tasks(exp_config.resolve_input(cfg.tasks))
         rows = trace.read_jsonl(BASELINE_ROWS)
         return analyze.render_report(
-            rows, tasks, cfg, exp_config.run_id(cfg), baseline
+            rows, tasks, cfg, exp_config.run_id(cfg), baseline,
+            max_calls=max_calls,
         )
 
     def test_scripted_caveats(self):
@@ -235,6 +242,35 @@ class TestReport(unittest.TestCase):
         self.assertNotIn("尚未接入 usage 观测", text)
         self.assertIn("--backend openai", text)
         self.assertNotIn("必然相等", text)
+
+    def test_openai_reproduce_command_carries_budget_cap(self):
+        """缺 --max-calls 的复现命令会被预算闸门拒绝，等于复制即失败。"""
+        text = self._render("openai", None)
+        self.assertIn("--backend openai --max-calls 360", text)
+        self.assertIn("预算上界（--max-calls） | 360", text)
+
+    def test_openai_reproduce_command_records_actual_cli_budget(self):
+        text = self._render("openai", None, max_calls=720)
+        self.assertIn("--backend openai --max-calls 720", text)
+        self.assertIn("预算上界（--max-calls） | 720", text)
+        self.assertNotIn("--max-calls 360", text)
+
+    def test_budget_cap_only_appears_on_openai(self):
+        """确定性后端不产生真实调用，报告不得假装启用了预算闸门。"""
+        for backend in ("scripted", "seeded"):
+            with self.subTest(backend=backend):
+                self.assertNotIn("--max-calls", self._render(backend, None))
+
+    def test_reproduce_command_is_parseable_by_the_cli(self):
+        """把报告里的命令喂回 CLI 解析器，确认预算参数确实落在同一位置。"""
+        text = self._render("openai", None, max_calls=720)
+        command = next(
+            line for line in text.splitlines()
+            if line.startswith("python -m eval.run")
+        )
+        args = cli.build_parser().parse_args(shlex.split(command)[3:])
+        self.assertEqual(args.backend, "openai")
+        self.assertEqual(args.max_calls, 720)
 
     def test_seeded_caveats_are_honest(self):
         text = self._render("seeded", None)

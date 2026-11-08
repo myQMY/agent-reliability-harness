@@ -230,7 +230,8 @@ def main(argv: list[str] | None = None) -> int:
             config_path = None
 
     report = analyze.render_report(
-        rows, tasks, cfg, rid, baseline_rows, config_path=config_path
+        rows, tasks, cfg, rid, baseline_rows,
+        config_path=config_path, max_calls=args.max_calls,
     )
 
     if args.report is not None:
